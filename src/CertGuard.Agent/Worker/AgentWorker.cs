@@ -24,6 +24,7 @@ public class AgentWorker : BackgroundService
     private readonly string _version;
     private readonly string _osType;
     private readonly string _osVer;
+    private bool _envReported;
 
     public AgentWorker(PlatformClient client, ProviderFactory factory,
         IOptions<AgentConfig> cfg, ILogger<AgentWorker> log, IHostApplicationLifetime life)
@@ -32,11 +33,7 @@ public class AgentWorker : BackgroundService
         _cfg = cfg.Value;
         _log = log;
         _life = life;
-        var asm = GetType().Assembly;
-        _version = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()
-                       ?.InformationalVersion
-                   ?? asm.GetName().Version?.ToString()
-                   ?? "1.0.0";
+        _version = CertGuard.Agent.Models.AgentInfo.Version;
         var (provider, osType, osVer) = factory.Create();
         _deploy = provider;
         _osType = osType;
@@ -88,12 +85,14 @@ private async Task SafeReportEnv(CancellationToken ct)
             OsType = _osType,
             OsVersion = _osVer,
             WebServer = _deploy.Name,
-            IpAddress = await TryGetPublicIpAsync(ct)
+            IpAddress = GetLocalIpAddress()
         }, ct);
+        _envReported = true;
+        _log.LogInformation("环境上报成功: IP={0}", GetLocalIpAddress() ?? "未获取到");
     }
     catch (HttpRequestException ex)
     {
-        _log.LogWarning(ex, "环境上报失败，下次心跳自动重试");
+        _log.LogWarning("环境上报失败（心跳周期重试）");
     }
 }
 private async Task Cycle(CancellationToken ct)
@@ -102,6 +101,12 @@ private async Task Cycle(CancellationToken ct)
     {
         // 心跳 — 获取最新版本号
         var latestVer = await _client.PingAsync(_version, ct);
+
+        // 环境未上报则在心跳中重试
+        if (!_envReported)
+        {
+            await SafeReportEnv(ct);
+        }
 
         // 检查版本：不一致则自动更新
         if (!string.IsNullOrEmpty(latestVer) &&
@@ -139,7 +144,7 @@ private async Task Cycle(CancellationToken ct)
     }
     catch (HttpRequestException ex)
     {
-        _log.LogWarning(ex, "平台无法连接，下次心跳自动重试");
+        _log.LogWarning("平台无法连接，下次心跳自动重试");
     }
     catch (Exception ex)
     {
@@ -437,13 +442,20 @@ private void PersistConfig()
     _log.LogInformation("配置已保存到: {Path}", path);
 }
 
-private static async Task<string?> TryGetPublicIpAsync(CancellationToken ct)
+/// <summary>从本地网络接口获取 IPv4 地址（排除回环/隧道/虚拟网卡）</summary>
+private static string? GetLocalIpAddress()
 {
     try
     {
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-        var ip = await http.GetStringAsync("https://api.ipify.org", ct);
-        return ip.Trim();
+        return System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
+            .Where(ni => ni.OperationalStatus == System.Net.NetworkInformation.OperationalStatus.Up
+                      && ni.NetworkInterfaceType != System.Net.NetworkInformation.NetworkInterfaceType.Loopback
+                      && ni.NetworkInterfaceType != System.Net.NetworkInformation.NetworkInterfaceType.Tunnel)
+            .SelectMany(ni => ni.GetIPProperties().UnicastAddresses)
+            .Where(ua => ua.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+                      && !System.Net.IPAddress.IsLoopback(ua.Address))
+            .Select(ua => ua.Address.ToString())
+            .FirstOrDefault();
     }
     catch
     {

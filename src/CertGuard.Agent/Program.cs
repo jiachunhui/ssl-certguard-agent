@@ -1,15 +1,17 @@
-﻿// ============================================================
+// ============================================================
 // Program.cs — Agent 入口
 // 用法:
 //   首次: certguard-agent --token ct_reg_xxxxxx
 //   更新密钥: certguard-agent --update-secret <新密钥>
 //   更新版本: certguard-agent --update <下载地址>
+//   卸载: certguard-agent --uninstall
 //   日常: certguard-agent
 // ============================================================
 
 using System.IO.Compression;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Diagnostics;
 using CertGuard.Agent.Models;
 using CertGuard.Agent.Services;
 using CertGuard.Agent.Worker;
@@ -60,6 +62,7 @@ foreach (var p in configPaths)
 
 // 2) 命令行参数
 string? updateUrl = null;
+var uninstall = false;
 for (int i = 0; i < args.Length; i++)
 {
     switch (args[i].ToLowerInvariant())
@@ -72,8 +75,10 @@ for (int i = 0; i < args.Length; i++)
         case "--heartbeat":     if (i + 1 < args.Length && int.TryParse(args[++i], out var hb)) cfg.HeartbeatSec = hb; break;
         case "--register-only": cfg.RegisterOnly = true; break;
         case "--insecure":      cfg.AllowInsecure = true; break;
+        case "--uninstall":     uninstall = true; break;
+        case "--keep-data":     cfg.KeepData = true; break;
         case "--help": case "-h": showHelp = true; break;
-        case "--version": case "-v": var vAsm = System.Reflection.Assembly.GetExecutingAssembly(); var vAttr = (System.Reflection.AssemblyInformationalVersionAttribute?)System.Attribute.GetCustomAttribute(vAsm, typeof(System.Reflection.AssemblyInformationalVersionAttribute)); var vs = vAttr?.InformationalVersion ?? vAsm.GetName().Version?.ToString() ?? "1.0.0"; Console.WriteLine($"certguard-agent v{vs}"); return 0;
+        case "--version": case "-v": Console.WriteLine($"certguard-agent v{CertGuard.Agent.Models.AgentInfo.Version}"); return 0;
     }
 }
 
@@ -101,6 +106,8 @@ Options:
   --heartbeat <s>  Heartbeat interval in seconds (default: 60)
   --register-only  Register then exit (used by install script)
   --insecure        Skip SSL certificate validation (for self-signed cert)
+  --uninstall       Uninstall agent: stop service, clean PATH, remove files
+  --keep-data       Keep data directory (use with --uninstall)
   --version, -v    Show version
   --help, -h       Show this help
 
@@ -112,6 +119,9 @@ Update secret:
 
 Update version:
   certguard-agent --update <download_url>
+
+Uninstall:
+  certguard-agent --uninstall [--keep-data]
 
 Env vars:
   CERTGUARD_TOKEN  Register token
@@ -141,10 +151,10 @@ if (!string.IsNullOrEmpty(cfg.NewSecret))
         );
 
         File.WriteAllText(configFile, newText);
-        Console.WriteLine($"✅ 密钥已更新！配置文件: {configFile}");
+        Console.WriteLine($"[√] 密钥已更新！配置文件: {configFile}");
         Console.WriteLine("   请重启服务使新密钥生效。");
-        Console.WriteLine($"   Windows: Restart-Service CertGuardAgent");
-        Console.WriteLine($"   Linux:   systemctl restart certguard-agent");
+        Console.WriteLine($"   Windows: Restart-Service TopSSLCertGuardAgent");
+        Console.WriteLine($"   Linux:   systemctl restart topssl-certguard-agent");
         return 0;
     }
     catch (Exception ex)
@@ -212,11 +222,11 @@ if (!string.IsNullOrEmpty(updateUrl))
         // 清理
         try { File.Delete(zipPath); } catch { }
 
-        Console.WriteLine($"✅ 更新完成！版本已升级到 {dir}");
+        Console.WriteLine($"[√] 更新完成！版本已升级到 {dir}");
         Console.WriteLine("   旧版本备份在: " + backupDir);
         Console.WriteLine("   请重启服务使新版本生效。");
-        Console.WriteLine($"   Windows: Restart-Service CertGuardAgent");
-        Console.WriteLine($"   Linux:   systemctl restart certguard-agent");
+        Console.WriteLine($"   Windows: Restart-Service TopSSLCertGuardAgent");
+        Console.WriteLine($"   Linux:   systemctl restart topssl-certguard-agent");
         return 0;
     }
     catch (Exception ex)
@@ -224,6 +234,12 @@ if (!string.IsNullOrEmpty(updateUrl))
         Console.Error.WriteLine($"错误: 更新失败 - {ex.Message}");
         return 1;
     }
+}
+
+// ── --uninstall 模式 ────────────────────────────
+if (uninstall)
+{
+    return UninstallAgent(cfg, exeDir, configPaths);
 }
 
 // ── 配置 Serilog 日志文件 ──────────────────────────
@@ -258,7 +274,7 @@ var builder = Host.CreateApplicationBuilder(args);
 
 builder.Services.AddWindowsService(o =>
 {
-    o.ServiceName = "CertGuardAgent";
+    o.ServiceName = "TopSSLCertGuardAgent";
 });
 
 builder.Logging.ClearProviders();
@@ -310,6 +326,149 @@ try
         Log.CloseAndFlush();
     }
 
+
+static int UninstallAgent(AgentConfig cfg, string exeDir, string[] configPaths)
+{
+    var serviceName = OperatingSystem.IsWindows() ? "TopSSLCertGuardAgent" : "topssl-certguard-agent";
+    var installDir = exeDir;
+    var dataDir = cfg.DataDir;
+    var exePath = Environment.GetCommandLineArgs()[0];
+    Console.WriteLine("================================================");
+    Console.WriteLine("  CertGuard Agent 卸载程序");
+    Console.WriteLine("================================================");
+    Console.WriteLine();
+    var configFile = configPaths.FirstOrDefault(File.Exists);
+    if (configFile != null)
+    {
+        try
+        {
+            var json = JsonDocument.Parse(File.ReadAllText(configFile));
+            if (json.RootElement.TryGetProperty("data_dir", out var dd))
+                dataDir = dd.GetString() ?? dataDir;
+        }
+        catch { }
+    }
+    Console.Write("  [1/4] 停止并删除服务... ");
+    try
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            using var stopProc = Process.Start(new ProcessStartInfo("sc.exe", $"stop {serviceName}")
+            {
+                CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden,
+                RedirectStandardOutput = true, RedirectStandardError = true,
+                UseShellExecute = false
+            });
+            stopProc?.WaitForExit(8000);
+            using var delProc = Process.Start(new ProcessStartInfo("sc.exe", $"delete {serviceName}")
+            {
+                CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden,
+                RedirectStandardOutput = true, RedirectStandardError = true,
+                UseShellExecute = false
+            });
+            delProc?.WaitForExit(8000);
+        }
+        else
+        {
+            using var stop = Process.Start("systemctl", $"stop {serviceName}");
+            stop?.WaitForExit(8000);
+            using var disable = Process.Start("systemctl", $"disable {serviceName}");
+            disable?.WaitForExit(8000);
+        }
+        Console.WriteLine("完成");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"忽略: {ex.Message}");
+    }
+    if (OperatingSystem.IsWindows())
+    {
+        Console.Write("  [2/4] 清理 PATH 环境变量... ");
+        try
+        {
+            var machinePath = Environment.GetEnvironmentVariable("Path", EnvironmentVariableTarget.Machine) ?? "";
+            var paths = machinePath.Split(';', StringSplitOptions.RemoveEmptyEntries);
+            var filtered = paths.Where(p =>
+                !p.TrimEnd('\\').Equals(installDir.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)
+            ).ToArray();
+            var newPath = string.Join(";", filtered);
+            if (newPath != machinePath)
+                Environment.SetEnvironmentVariable("Path", newPath, EnvironmentVariableTarget.Machine);
+            Console.WriteLine("完成");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"跳过: {ex.Message}");
+        }
+    }
+    else
+    {
+        Console.WriteLine("  [2/4] 跳过 PATH 清理（Linux 请手动移除 profile 配置）");
+    }
+    if (!cfg.KeepData)
+    {
+        Console.Write("  [3/4] 删除数据目录... ");
+        try
+        {
+            if (Directory.Exists(dataDir))
+                Directory.Delete(dataDir, true);
+            Console.WriteLine("完成");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"跳过: {ex.Message}");
+        }
+    }
+    else
+    {
+        Console.WriteLine("  [3/4] 跳过数据目录（已保留）");
+    }
+    Console.Write("  [4/4] 删除安装目录... ");
+    try
+    {
+        if (!Directory.Exists(installDir))
+        {
+            Console.WriteLine("目录不存在，跳过");
+        }
+        else if (OperatingSystem.IsWindows())
+        {
+            foreach (var f in Directory.GetFiles(installDir))
+            {
+                if (f.Equals(exePath, StringComparison.OrdinalIgnoreCase)) continue;
+                try { File.Delete(f); } catch { }
+            }
+            foreach (var d in Directory.GetDirectories(installDir))
+            {
+                try { Directory.Delete(d, true); } catch { }
+            }
+            var batPath = Path.Combine(Path.GetTempPath(), $"certguard_cleanup_{Guid.NewGuid():N}.bat");
+            var batContent = $":loop\r\ndel /f /q \"{exePath}\" >nul 2>&1\r\nif exist \"{exePath}\" (\r\n    ping -n 3 127.0.0.1 >nul\r\n    goto loop\r\n)\r\nrmdir /s /q \"{installDir}\" >nul 2>&1\r\ndel /f /q \"{batPath}\" >nul 2>&1\r\n";
+            File.WriteAllText(batPath, batContent);
+            Process.Start(new ProcessStartInfo("cmd.exe", $"/c start /b \"\" \"{batPath}\"")
+            {
+                CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden, UseShellExecute = false
+            });
+            Console.WriteLine("完成（残留清理脚本已启动）");
+        }
+        else
+        {
+            Directory.Delete(installDir, true);
+            Console.WriteLine("完成");
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"跳过: {ex.Message}");
+    }
+    Console.WriteLine();
+    Console.WriteLine("[√] CertGuard Agent 已卸载完成。");
+    if (cfg.KeepData)
+    {
+        Console.WriteLine($"   数据目录已保留: {dataDir}");
+        Console.WriteLine("   如需重新安装，请使用 --token 注册。");
+    }
+    return 0;
+}
 
 static bool IsLocalhost(Uri uri)
 {

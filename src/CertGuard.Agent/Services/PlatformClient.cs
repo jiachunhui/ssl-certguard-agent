@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // Services/PlatformClient.cs -- HMAC 签名 HTTP 客户端（核心通信层）
 // ============================================================
 
@@ -37,6 +37,24 @@ public class PlatformClient
 
     /// <summary>Agent 是否已注册（有 agentId + secret）</summary>
     public bool Registered => _registered;
+
+
+    // ============================================================
+    // 注销（卸载时调用，删除平台上的 Agent 记录）
+    // ============================================================
+    public async Task UnregisterAsync(CancellationToken ct)
+    {
+        if (!_registered) return;
+        try
+        {
+            await Signed(HttpMethod.Post, "/api/agent/unregister", null, ct);
+            _log.LogInformation("Agent 已从平台注销");
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "注销请求失败（忽略，Agent 仍将继续卸载）");
+        }
+    }
 
     // ============================================================
     // 注册（使用一次性令牌，不走 HMAC）

@@ -1,16 +1,16 @@
-﻿<# ============================================================
- CertGuard Agent Windows 一键安装脚本
+<# ============================================================
+# TopSSL-CertGuard-Agent Windows 一键安装脚本
  用法: powershell -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; iex ([System.Text.Encoding]::UTF8.GetString((New-Object System.Net.WebClient).DownloadData('https://localhost:5002/agent/install.ps1'))); Install-CertGuardAgent -Token ct_reg_xxxxxx"
  ============================================================ #>
 
 # 兼容 iex 远程执行：param() 在 iex 中不生效，改用直接赋值
 $Token = ""
-$InstallDir = "$env:ProgramFiles\CertGuard\Agent"
-$DataDir = "$env:ProgramData\CertGuard"
+$InstallDir = "$env:ProgramFiles\TopSSL-CertGuard-Agent"
+$DataDir = "$env:ProgramData\TopSSL-CertGuard-Agent"
 $Server = "http://localhost:5003"
 
  $Script:Version = "1.0.2"
-$Script:ServiceName = "CertGuardAgent"
+$Script:ServiceName = "TopSSLCertGuardAgent"
 
 function Write-Step {
     param([string]$Message, [int]$Step, [int]$Total)
@@ -33,7 +33,7 @@ function Install-CertGuardAgent {
     }
 
     Write-Host "================================================"
-    Write-Host "  CertGuard Agent v$Script:Version 安装程序"
+    Write-Host "  TopSSL-CertGuard-Agent 安装程序"
     Write-Host "================================================"
     Write-Host ""
     Write-Host "安装目录: $InstallDir"
@@ -44,12 +44,12 @@ function Install-CertGuardAgent {
     # 检查管理员权限
     $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if (-not $isAdmin) {
-        Write-Host "错误: 安装 CertGuard Agent 需要管理员权限，请以管理员身份运行 PowerShell。" -ForegroundColor Red
+        Write-Host "错误: 安装 TopSSL-CertGuard-Agent 需要管理员权限，请以管理员身份运行 PowerShell。" -ForegroundColor Red
         Write-Host "     右键点击 PowerShell → 以管理员身份运行" -ForegroundColor Yellow
         exit 1
     }
 
-    $totalSteps = 6
+    $totalSteps = 7
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
     # ── 0. 停止旧服务（提前到解压前）─────────────────
@@ -119,7 +119,7 @@ function Install-CertGuardAgent {
         exit 1
     }
 
-    $downloadUrl = "https://localhost:5002/agent/$Script:Version/certguard-agent-$arch.zip"
+    $downloadUrl = "https://localhost:5002/agent/certguard-agent-$arch.zip"
     $zipPath = Join-Path $env:TEMP "certguard-agent.zip"
 
     Write-Host "  下载: $downloadUrl"
@@ -128,16 +128,10 @@ function Install-CertGuardAgent {
         Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
     }
     catch {
-        Write-Host "  下载失败，尝试备用地址..." -ForegroundColor Yellow
-        $downloadUrl = "https://github.com/topssl/certguard-agent/releases/download/v$Script:Version/certguard-agent-$arch.zip"
-        try {
-            Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
-        }
-        catch {
-            Write-Host "  下载失败: $_" -ForegroundColor Red
-            exit 1
-        }
+        Write-Host "  下载失败: $_" -ForegroundColor Red
+        exit 1
     }
+
 
     # 解压前先清理旧文件（此时服务已停止，文件不再被锁定）
     if (Test-Path $InstallDir) {
@@ -179,10 +173,11 @@ function Install-CertGuardAgent {
     Write-Step -Message "创建并启动 Windows 服务..." -Step 6 -Total $totalSteps
 
     $binaryPath = "`"$agentExe`" --data-dir `"$DataDir`""
-    $displayName = "CertGuard Agent - 证书自动部署守护进程"
-    $description = "CertGuard Agent — SSL 证书自动部署守护进程"
+    $displayName = "TopSSL.cn CertGuard Agent - SSL证书自动部署守护进程"
+    $description = "TopSSL.cn (https://topssl.cn) — SSL certificate auto-deployment daemon (Nginx/Apache/IIS)"
 
     Write-Host "  创建服务: $ServiceName"
+
     try {
         $newServiceParams = @{
             Name           = $ServiceName
@@ -200,6 +195,7 @@ function Install-CertGuardAgent {
     }
 
     Write-Host "  启动服务..."
+
     try {
         Start-Service -Name $ServiceName -ErrorAction Stop
         Start-Sleep -Seconds 3
@@ -207,12 +203,32 @@ function Install-CertGuardAgent {
     catch {
         Write-Host "  服务启动失败，错误: $_" -ForegroundColor Yellow
     }
+    # ── 5. 添加系统 PATH ─────────────────────────
+            # $─$─ 5. 添加系统 PATH $─$─$─$─$─$─$─$─$─$─$─$─$─$─$─$─$─$─$─$─$─
+    Write-Step -Message "添加系统 PATH..." -Step 7 -Total 7
+    try {
+        $machinePath = [Environment]::GetEnvironmentVariable("Path", [EnvironmentVariableTarget]::Machine)
+        $installDirNormalized = $InstallDir.TrimEnd('\')
+        $paths = $machinePath -split ';' | ForEach-Object { $_.TrimEnd('\') }
+        if ($InstallDir -notin $paths -and $installDirNormalized -notin $paths) {
+            [Environment]::SetEnvironmentVariable("Path", "$machinePath;$InstallDir", [EnvironmentVariableTarget]::Machine)
+            Write-Host "  已添加到系统 PATH" -ForegroundColor Green
+            # 刷新当前进程的 PATH
+            $env:Path = [Environment]::GetEnvironmentVariable("Path", [EnvironmentVariableTarget]::Machine)
+        }
+        else {
+            Write-Host "  已在 PATH 中，跳过" -ForegroundColor Green
+        }
+    }
+    catch {
+        Write-Host "  添加 PATH 失败: $_" -ForegroundColor Yellow
+    }
 
-    # ── 验证 ──────────────────────────────────────
+# ── 验证 ──────────────────────────────────────
     $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if ($svc -and $svc.Status -eq 'Running') {
         Write-Host ""
-        Write-Host "✅ CertGuard Agent 安装成功！" -ForegroundColor Green
+        Write-Host "✅ TopSSL-CertGuard-Agent 安装成功！" -ForegroundColor Green
         Write-Host "   程序目录: $InstallDir"
         Write-Host "   配置文件: $InstallDir\agent.json"
         Write-Host "   数据目录: $DataDir"

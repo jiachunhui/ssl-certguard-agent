@@ -97,6 +97,8 @@ dotnet publish -c Release -r linux-arm64 --self-contained -o ../build/linux-arm6
 
 # Windows x64
 dotnet publish -c Release -r win-x64 --self-contained -o ../build/win-x64
+
+dotnet publish -c Release -r win-x64 --self-contained -p:Version=1.1.3 -p:AssemblyVersion=1.1.3.0 -o ../build/win-x64
 ```
 
 ## 许可证

@@ -4,3 +4,6 @@
 
 /src/build/win-x64/certguard-agent-win-x64.zip
 /src/build/win-x64/certguard-agent.exe
+
+/bin
+/obj

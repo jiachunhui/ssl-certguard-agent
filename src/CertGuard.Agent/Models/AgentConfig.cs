@@ -22,12 +22,12 @@ public class AgentConfig
     public int HeartbeatSec { get; set; } = 60;
 
     /// <summary>数据目录：用于存储证书等运行时数据。
-    /// Windows 默认 %ProgramData%\CertGuard，Linux 默认 /var/lib/certguard</summary>
+    /// Windows 默认 %ProgramData%\TopSSL-CertGuard-Agent，Linux 默认 /var/lib/TopSSL-CertGuard-Agent</summary>
     public string DataDir { get; set; } = OperatingSystem.IsWindows()
         ? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "CertGuard")
-        : "/var/lib/certguard";
+            "TopSSL-CertGuard-Agent")
+        : "/var/lib/TopSSL-CertGuard-Agent";
 
     /// <summary>一次性注册令牌（仅首次运行需要，注册成功后清空）</summary>
     public string? RegisterToken { get; set; }
@@ -46,4 +46,12 @@ public class AgentConfig
     /// <summary>更新密钥（由 --update-secret 传入，替换本地 agent.json 中的 agent_secret）</summary>
     [System.Text.Json.Serialization.JsonIgnore]
     public string? NewSecret { get; set; }
-}
+
+    /// <summary>卸载 Agent（由 --uninstall 触发，执行后退出）</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool Uninstall { get; set; }
+
+    /// <summary>卸载时保留数据目录（由 --keep-data 传入）</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool KeepData { get; set; }
+ }
