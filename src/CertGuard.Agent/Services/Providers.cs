@@ -201,7 +201,7 @@ public class IisProvider : IDeployProvider
                     _log.LogInformation("  检查站点 '{Site}' 绑定是否包含域名 '{Domain}'", siteName, domain);
                     if (SiteHasBindingForDomain(bindings, domain))
                     {
-                        _log.LogInformation("  ✅ 匹配: {Site}", siteName);
+                        _log.LogInformation("  [√] 匹配: {Site}", siteName);
                         matchedSites.Add(siteName);
                     }
                 }
