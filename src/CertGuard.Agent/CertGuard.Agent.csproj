@@ -12,7 +12,7 @@
     <Description>CertGuard Agent - SSL certificate auto-deployment daemon</Description>
     <Authors>TOPSSL.CN</Authors>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
-    <RepositoryUrl>https://github.com/topssl/certguard-agent</RepositoryUrl>
+    <RepositoryUrl>https://github.com/jiachunhui/ssl-certguard-agent</RepositoryUrl>
    
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
@@ -33,3 +33,4 @@
   </ItemGroup>
 
 </Project>
+
