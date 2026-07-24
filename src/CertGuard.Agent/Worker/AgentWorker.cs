@@ -319,8 +319,8 @@ private async Task WriteWindowsUpdateScript(string exeDir, string extractDir, Ca
             + "ping -n 6 127.0.0.1 > nul\r\n"
             + "echo [CertGuard] Copying new files...\r\n"
             + "xcopy /y /e /q \"" + extractDir + "\\*\" \"" + exeDir + "\\\" > nul 2>&1\r\n"
-            + "echo [CertGuard] Starting service CertGuardAgent...\r\n"
-            + "sc start CertGuardAgent > nul 2>&1\r\n"
+            + "echo [CertGuard] Starting service TopSSLCertGuardAgent...\r\n"
+            + "sc start TopSSLCertGuardAgent > nul 2>&1\r\n"
             + "echo [CertGuard] Update complete.\r\n"
             + "del \"%~f0\"\r\n";
     await File.WriteAllTextAsync(scriptPath, bat, ct);
@@ -335,8 +335,8 @@ private async Task WriteLinuxUpdateScript(string exeDir, string extractDir, Canc
             + "echo '[CertGuard] Copying new files...'\n"
             + "cp -rf " + extractDir + "/* " + exeDir + "/\n"
             + "chmod +x " + exeDir + "/certguard-agent\n"
-            + "echo '[CertGuard] Starting service certguard-agent...'\n"
-            + "systemctl restart certguard-agent\n"
+            + "echo '[CertGuard] Starting service topssl-certguard-agent...'\n"
+            + "systemctl restart topssl-certguard-agent\n"
             + "echo '[CertGuard] Update complete.'\n"
             + "rm -- \"$0\"\n";
     await File.WriteAllTextAsync(scriptPath, sh, ct);
