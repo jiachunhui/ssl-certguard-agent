@@ -102,3 +102,18 @@ dotnet publish -c Release -r win-x64 --self-contained -o ../build/win-x64
 ## 许可证
 
 Apache License 2.0 — 允许商业使用、修改和分发。
+ 
+ ## 文档体系
+ 
+ 本项目提供完整的中文文档，位于 [docs/](./docs/README.md) 目录：
+ 
+ | 章节 | 说明 |
+ |------|------|
+ | [概述](./docs/01-概述/README.md) | 项目介绍、为什么开源、安全架构 |
+ | [快速入门](./docs/02-快速入门/README.md) | 30 秒上手体验 |
+ | [安装指南](./docs/03-安装指南/README.md) | 各平台详细安装步骤 |
+ | [操作指南](./docs/04-操作指南/README.md) | 命令行、配置、日志、维护 |
+ | [实践教程](./docs/05-实践教程/README.md) | Nginx/Apache/IIS 真实场景 |
+ | [常见问题](./docs/06-常见问题/README.md) | 高频问题与解决方案 |
+ | [服务支持](./docs/07-服务支持/README.md) | 获取帮助与反馈 |
+ | [开发指南](./docs/08-开发指南/README.md) | 构建、贡献、参与开源 |
