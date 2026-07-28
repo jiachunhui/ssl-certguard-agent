@@ -1,0 +1,7 @@
+{
+  "name": "certguard-agent",
+  "display_name": "CertGuard Agent",
+  "description": "Project-specific knowledge and conventions for the CertGuard Agent project",
+  "skills": ["certguard-agent"],
+  "version": "1.0.0"
+}

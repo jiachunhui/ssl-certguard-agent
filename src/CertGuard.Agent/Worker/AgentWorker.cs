@@ -65,6 +65,11 @@ public class AgentWorker : BackgroundService
             _log.LogCritical(ex, "Agent 无身份信息且没有注册令牌");
             _life.StopApplication();
         }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("AGENT_NOT_FOUND"))
+        {
+            _log.LogCritical("Agent 在平台上不存在，已停止运行");
+            _life.StopApplication();
+        }
         catch (OperationCanceledException)
         {
             _log.LogInformation("Agent 已停止");
@@ -90,7 +95,7 @@ private async Task SafeReportEnv(CancellationToken ct)
         _envReported = true;
         _log.LogInformation("环境上报成功: IP={0}", GetLocalIpAddress() ?? "未获取到");
     }
-    catch (HttpRequestException ex)
+    catch (HttpRequestException)
     {
         _log.LogWarning("环境上报失败（心跳周期重试）");
     }
@@ -142,13 +147,13 @@ private async Task Cycle(CancellationToken ct)
         foreach (var t in tasks)
             await DoTask(t, ct);
     }
-    catch (HttpRequestException ex)
+    catch (HttpRequestException)
     {
         _log.LogWarning("平台无法连接，下次心跳自动重试");
     }
     catch (Exception ex)
     {
-        _log.LogError(ex, "心跳周期异常");
+        _log.LogError("心跳周期异常: {Error}", ex.Message);
     }
 }
 
@@ -168,22 +173,141 @@ private async Task DoTask(TaskItem t, CancellationToken ct)
                 await DoUpdateAgent(t, ct);
                 break;
 
-            case "health_report":
-                await _client.ReportAsync(t.TaskId, true,
-                    JsonSerializer.Serialize(new { agent = "ok" }), null, ct);
+           case "health_report":
+               await _client.ReportAsync(t.TaskId, true,
+                   JsonSerializer.Serialize(new { agent = "ok" }), null, ct);
+               break;
+
+            case "uninstall_agent":
+                await DoUninstall(t, ct);
                 break;
 
             default:
-                await _client.ReportAsync(t.TaskId, false, null,
-                    $"未知任务类型: {t.TaskType}", ct);
+               await _client.ReportAsync(t.TaskId, false, null,
+                   $"未知任务类型: {t.TaskType}", ct);
                 break;
         }
     }
     catch (Exception ex)
     {
-        _log.LogError(ex, "任务 #{Id} 执行失败", t.TaskId);
+        _log.LogError("任务 #{Id} 执行失败: {Error}", t.TaskId, ex.Message);
         await _client.ReportAsync(t.TaskId, false, null, ex.Message, ct);
     }
+}
+
+private async Task DoUninstall(TaskItem t, CancellationToken ct)
+{
+    _log.LogInformation("任务 #{Id}: 开始卸载 Agent", t.TaskId);
+    await _client.ReportAsync(t.TaskId, true, null, null, ct);
+    await _client.UnregisterAsync(ct);
+    var serviceName = OperatingSystem.IsWindows()
+        ? "TopSSLCertGuardAgent"
+        : "topssl-certguard-agent";
+    var exePath = Environment.ProcessPath ?? Environment.GetCommandLineArgs()[0];
+    var installDir = Path.GetDirectoryName(exePath) ?? ".";
+
+    // ---- 1. 停服务 + 删服务 ----
+    try
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            using var stopProc = Process.Start(new ProcessStartInfo("sc.exe", $"stop {serviceName}")
+            {
+                CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden,
+                RedirectStandardOutput = true, RedirectStandardError = true,
+                UseShellExecute = false
+            });
+            stopProc?.WaitForExit(8000);
+            using var delProc = Process.Start(new ProcessStartInfo("sc.exe", $"delete {serviceName}")
+            {
+                CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden,
+                RedirectStandardOutput = true, RedirectStandardError = true,
+                UseShellExecute = false
+            });
+            delProc?.WaitForExit(8000);
+        }
+        else
+        {
+            using var stop = Process.Start("systemctl", $"stop {serviceName}");
+            stop?.WaitForExit(8000);
+            using var disable = Process.Start("systemctl", $"disable {serviceName}");
+            disable?.WaitForExit(8000);
+        }
+    }
+    catch (Exception ex)
+    {
+        _log.LogWarning("停服务时出现异常（忽略，继续清理）: {Error}", ex.Message);
+    }
+
+    // ---- 2. 清理 PATH（仅 Windows） ----
+    if (OperatingSystem.IsWindows())
+    {
+        try
+        {
+            var machinePath = Environment.GetEnvironmentVariable("Path", EnvironmentVariableTarget.Machine) ?? "";
+            var paths = machinePath.Split(';', StringSplitOptions.RemoveEmptyEntries);
+            var filtered = paths.Where(p =>
+                !p.TrimEnd('\\').Equals(installDir.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)
+            ).ToArray();
+            var newPath = string.Join(";", filtered);
+            if (newPath != machinePath)
+                Environment.SetEnvironmentVariable("Path", newPath, EnvironmentVariableTarget.Machine);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning("清理 PATH 时出现异常（忽略）: {Error}", ex.Message);
+        }
+    }
+
+    // ---- 3. 删除数据目录 ----
+    if (!_cfg.KeepData)
+    {
+        try
+        {
+            if (Directory.Exists(_cfg.DataDir))
+                Directory.Delete(_cfg.DataDir, true);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning("删除数据目录时出现异常（忽略）: {Error}", ex.Message);
+        }
+    }
+
+    // ---- 4. 删除安装目录 ----
+    try
+    {
+        if (Directory.Exists(installDir))
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                foreach (var f in Directory.GetFiles(installDir))
+                {
+                    if (f.Equals(exePath, StringComparison.OrdinalIgnoreCase)) continue;
+                    try { File.Delete(f); } catch { }
+                }
+                foreach (var d in Directory.GetDirectories(installDir))
+                    try { Directory.Delete(d, true); } catch { }
+                var batPath = Path.Combine(Path.GetTempPath(), $"certguard_cleanup_{Guid.NewGuid():N}.bat");
+                var c = $":loop\r\ndel /f /q \"{exePath}\" >nul 2>&1\r\nif exist \"{exePath}\" (\r\n    ping -n 3 127.0.0.1 >nul\r\n    goto loop\r\n)\r\nrmdir /s /q \"{installDir}\" >nul 2>&1\r\ndel /f /q \"{batPath}\" >nul 2>&1\r\n";
+                File.WriteAllText(batPath, c);
+                Process.Start(new ProcessStartInfo("cmd.exe", $"/c start /b \"\" \"{batPath}\"")
+                {
+                    CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden, UseShellExecute = false
+                });
+            }
+            else
+            {
+                Directory.Delete(installDir, true);
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        _log.LogWarning("删除安装目录时出现异常（忽略）: {Error}", ex.Message);
+    }
+
+    _log.LogInformation("任务 #{Id}: Agent 卸载完成，服务即将退出", t.TaskId);
+    _life.StopApplication();
 }
 
 private async Task DoDeployCert(TaskItem t, CancellationToken ct)
@@ -260,7 +384,7 @@ private async Task DoUpdateAgent(TaskItem t, CancellationToken ct)
     catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
     catch (Exception ex)
     {
-        _log.LogError(ex, "更新失败");
+        _log.LogError("更新失败: {Error}", ex.Message);
         await _client.ReportAsync(t.TaskId, false, null, ex.Message, ct);
     }
 }
@@ -407,7 +531,7 @@ private async Task EnsureIdentity(CancellationToken ct)
         }
         catch (HttpRequestException ex)
         {
-            _log.LogWarning(ex, "平台连接失败（注册），将在 {Delay} 秒后重试...",
+            _log.LogWarning("平台连接失败（注册）: {Error}，将在 {Delay} 秒后重试...", ex.Message,
                 (int)retryDelay.TotalSeconds);
             await Task.Delay(retryDelay, ct);
             retryDelay = TimeSpan.FromSeconds(Math.Min(retryDelay.TotalSeconds * 2, 120));

@@ -52,7 +52,7 @@ public class PlatformClient
         }
         catch (Exception ex)
         {
-            _log.LogWarning(ex, "注销请求失败（忽略，Agent 仍将继续卸载）");
+            _log.LogWarning("注销请求失败（忽略，Agent 仍将继续卸载）: {Error}", ex.Message);
         }
     }
 
@@ -187,7 +187,18 @@ public class PlatformClient
             req.Content = JsonContent.Create(body, options: _json);
 
         var resp = await _http.SendAsync(req, ct);
-        resp.EnsureSuccessStatusCode();
+        if (!resp.IsSuccessStatusCode)
+        {
+            var respBody = await resp.Content.ReadAsStringAsync(ct);
+            _log.LogWarning("API 请求失败: {Method} {Path} — {StatusCode} {Body}",
+                method, path, (int)resp.StatusCode, respBody);
+
+            if ((int)resp.StatusCode == 401 && respBody.Contains("Agent 不存在"))
+                throw new InvalidOperationException("AGENT_NOT_FOUND: 平台无此 Agent 记录，Agent 将停止运行");
+
+            throw new HttpRequestException($"请求失败: {(int)resp.StatusCode} {resp.ReasonPhrase}");
+        }
+
         return await resp.Content.ReadAsStringAsync(ct);
     }
 
