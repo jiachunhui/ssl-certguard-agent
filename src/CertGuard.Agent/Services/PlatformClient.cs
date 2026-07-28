@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // Services/PlatformClient.cs -- HMAC 签名 HTTP 客户端（核心通信层）
 // ============================================================
 
@@ -76,8 +76,23 @@ public class PlatformClient
         var resp = await _http.PostAsJsonAsync("/api/agent/register", body, _json, ct);
         resp.EnsureSuccessStatusCode();
 
-        var result = await UnwrapAsync<RegisterRes>(resp, ct)
-                     ?? throw new InvalidOperationException("注册响应为空");
+        var result = await UnwrapAsync<RegisterRes>(resp, ct);
+        if (result is null)
+        {
+            var raw = await resp.Content.ReadAsStringAsync(ct);
+            var errMsg = "注册失败";
+            if (!string.IsNullOrWhiteSpace(raw))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(raw);
+                    if (doc.RootElement.TryGetProperty("errors", out var err) && err.ValueKind == System.Text.Json.JsonValueKind.String)
+                        errMsg = err.GetString() ?? errMsg;
+                }
+                catch (System.Text.Json.JsonException) { }
+            }
+            throw new InvalidOperationException(errMsg);
+        }
 
         _agentId = result.AgentId;
         _secret = result.Secret;
@@ -227,13 +242,13 @@ public class PlatformClient
 
         if (!root.TryGetProperty("succeeded", out var succeeded) || !succeeded.GetBoolean())
         {
-            _log.LogWarning("API 返回失败响应 {Path}: {Raw}", path, raw);
+            _log.LogWarning("API 返回失败响应 {Path}", path);
             return default;
         }
 
         if (!root.TryGetProperty("data", out var data))
         {
-            _log.LogWarning("API 响应缺少 data 字段 {Path}: {Raw}", path, raw);
+            _log.LogWarning("API 响应缺少 data 字段 {Path}", path);
             return default;
         }
 

@@ -536,6 +536,13 @@ private async Task EnsureIdentity(CancellationToken ct)
             await Task.Delay(retryDelay, ct);
             retryDelay = TimeSpan.FromSeconds(Math.Min(retryDelay.TotalSeconds * 2, 120));
         }
+        catch (InvalidOperationException ex)
+        {
+            _log.LogWarning("注册失败（业务拒绝）: {Error}，将在 {Delay} 秒后重试...", ex.Message,
+                (int)retryDelay.TotalSeconds);
+            await Task.Delay(retryDelay, ct);
+            retryDelay = TimeSpan.FromSeconds(Math.Min(retryDelay.TotalSeconds * 2, 120));
+        }
     }
 }
 
