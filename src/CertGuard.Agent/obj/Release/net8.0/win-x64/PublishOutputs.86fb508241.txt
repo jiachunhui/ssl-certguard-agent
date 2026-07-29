@@ -1,1 +1,0 @@
-D:\trae\demo3\CertGuard.Agent\src\build\win-x64\certguard-agent.exe
