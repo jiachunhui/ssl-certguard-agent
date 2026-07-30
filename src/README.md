@@ -104,3 +104,20 @@ dotnet publish -c Release -r win-x64 --self-contained -p:Version=1.1.3 -p:Assemb
 ## 许可证
 
 Apache License 2.0 — 允许商业使用、修改和分发。
+
+
+
+```bash
+# 进项目目录
+cd .\CertGuard.Agent
+
+# 打 1.1.3 版本，四个 RID 全打包 (linux-x64/arm64 + win-x64/arm64)
+.\publish-agent.ps1 -Version 1.1.3
+
+# 只打 linux-x64 的 1.1.3
+.\publish-agent.ps1 -Version 1.1.3 -Rids linux-x64
+
+# 等价你原命令组合: linux-x64 + linux-arm64 + win-x64，且带版本号
+.\publish-agent.ps1 -Version 1.1.3 -Rids linux-x64,linux-arm64,win-x64
+
+```

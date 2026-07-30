@@ -5,13 +5,14 @@
 /src/build/win-x64/certguard-agent-win-x64.zip
 /src/build/win-x64/certguard-agent.exe
 
- /src/build
- /deploy/build
- **/[Bb]in/
- **/[Oo]bj/
- .vs/
- *.sourcelink.json
+/src/build
+/deploy/build
+**/[Bb]in/
+**/[Oo]bj/
+.vs/
+*.sourcelink.json
 
- /src/build/
- /src/CertGuard.Agent/.publish/	
+/src/build/
+
 /src/CertGuard.Agent/.publish
+/src/CertGuard.Agent/dist
