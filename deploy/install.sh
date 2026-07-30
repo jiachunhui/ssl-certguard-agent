@@ -6,12 +6,19 @@
 
 set -e
 
+# 全局关闭 .NET 全球化依赖(libicu)。覆盖 install.sh 子进程内的所有 Agent 调用
+# (如注册 --register-only)。注意:systemd 服务进程不继承此 export,由 unit 文件内
+# 的 Environment= 单独覆盖;交互式 shell 由 /etc/profile.d 覆盖。自带
+# InvariantGlobalization=true 的二进制(>=1.1.7)不受影响,此项属双保险。
+export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+
 TOKEN=""
+KEEP_IDENTITY=false
 SERVER="http://localhost:5003"
 INSTALL_DIR="/opt/TopSSL-CertGuard-Agent"
 DATA_DIR="/var/lib/TopSSL-CertGuard-Agent"
 SERVICE_NAME="topssl-certguard-agent"
-VERSION="1.0.2"
+VERSION="1.0.5"
 
 # ───────────────────────────────────────────────
 # 输出格式化辅助函数（统一规范）
@@ -70,18 +77,20 @@ cmd_line() {
 # ───────────────────────────────────────────────
 # 解析参数
 # ───────────────────────────────────────────────
-while [[ $# -gt 0 ]]; do
+while [ $# -gt 0 ]; do
     case $1 in
-        --token)  TOKEN="$2";      shift 2 ;;
-        --server) SERVER="$2";     shift 2 ;;
-        --dir)    INSTALL_DIR="$2"; shift 2 ;;
+        --token)         TOKEN="$2";       shift 2 ;;
+        --server)        SERVER="$2";      shift 2 ;;
+        --dir)           INSTALL_DIR="$2"; shift 2 ;;
+        --keep-identity) KEEP_IDENTITY=true; shift ;;
         *) shift ;;
     esac
 done
 
-if [ -z "$TOKEN" ]; then
+if [ -z "$TOKEN" ] && [ "$KEEP_IDENTITY" != "true" ]; then
     echo_err "需要 --token 参数"
     echo "    用法: curl ... | bash -s -- --token ct_reg_xxxxxx [--server http://your-platform:port]"
+    echo "    升级保留身份: curl ... | sudo bash -s -- --keep-identity [--server http://your-platform:port]"
     exit 1
 fi
 
@@ -167,11 +176,46 @@ if [ ! -x "${AGENT_BIN}" ]; then
     exit 1
 fi
 
-echo_sub_info "执行首次注册..."
-if "${AGENT_BIN}" --token "${TOKEN}" --server "${SERVER}" --data-dir "${DATA_DIR}" --register-only; then
-    echo_ok "注册完成"
+# 注册前身份处理。
+# 默认: 清理旧 agent.json,强制用本次 --token 全新注册。
+#   原因:Agent 在 agent.json 已存在时会"加载旧身份并退出",忽略传入的 token,
+#   导致换 token 重装后服务连不上平台("401 Agent 不存在"死循环)。
+# --keep-identity: 保留现有身份(如仅升级二进制),此时 --token 可省略。
+OLD_AGENT_JSON_DATA="${DATA_DIR}/agent.json"
+OLD_AGENT_JSON_INST="${INSTALL_DIR}/agent.json"
+HAS_EXISTING_IDENTITY=false
+if [ -f "$OLD_AGENT_JSON_DATA" ] || [ -f "$OLD_AGENT_JSON_INST" ]; then
+    HAS_EXISTING_IDENTITY=true
+fi
+REGISTER_SKIP=false
+
+if [ "$KEEP_IDENTITY" = "true" ]; then
+    if [ "$HAS_EXISTING_IDENTITY" = "true" ]; then
+        echo_sub_info "保留现有身份,跳过注册 (--keep-identity)"
+        REGISTER_SKIP=true
+    else
+        # 无现有身份,--keep-identity 无意义,回退到正常注册(此时必须有 token)
+        if [ -z "$TOKEN" ]; then
+            echo_err "--keep-identity 已指定,但未发现现有身份,且未提供 --token,无法注册"
+            exit 1
+        fi
+        echo_sub_info "未发现现有身份,改用提供的 Token 全新注册"
+    fi
 else
-    echo_warn "注册失败（退出码: $?），请检查 Token 是否有效。"
+    # 默认: 清理旧身份,强制全新注册
+    if [ "$HAS_EXISTING_IDENTITY" = "true" ]; then
+        rm -f "$OLD_AGENT_JSON_DATA" "$OLD_AGENT_JSON_INST"
+        echo_sub_info "已清理旧身份文件,将使用本次 Token 全新注册"
+    fi
+fi
+
+if [ "$REGISTER_SKIP" != "true" ]; then
+    echo_sub_info "执行首次注册..."
+    if "${AGENT_BIN}" --token "${TOKEN}" --server "${SERVER}" --data-dir "${DATA_DIR}" --register-only; then
+        echo_ok "注册完成"
+    else
+        echo_warn "注册失败（退出码: $?），请检查 Token 是否有效。"
+    fi
 fi
 
 # 注册成功后，如果 DataDir 下有 agent.json 且安装目录还没有，复制一份到安装目录
@@ -196,7 +240,6 @@ ExecStart=${INSTALL_DIR}/certguard-agent --data-dir ${DATA_DIR}
 Restart=always
 RestartSec=10
 User=root
-KillMode=process
 Environment=DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
 
 [Install]
@@ -219,20 +262,25 @@ fi
 # ── 7. 将安装目录加入系统 PATH ──────────────────
 echo_step 7 $TOTAL_STEPS "将安装目录加入系统 PATH..."
 PROFILE_D="/etc/profile.d/topssl-certguard-agent.sh"
+PROFILE_CHANGED=false
 if [ ! -f "$PROFILE_D" ]; then
-    echo "# TopSSL-CertGuard-Agent PATH" > "$PROFILE_D"
-    echo "export PATH=\"\$PATH:${INSTALL_DIR}\"" >> "$PROFILE_D"
+    echo "# TopSSL-CertGuard-Agent PATH & 环境" > "$PROFILE_D"
     chmod 644 "$PROFILE_D"
-    echo_ok "已添加: $PROFILE_D"
-    echo_warn "请重新登录或执行 'source $PROFILE_D' 使 PATH 生效"
+    PROFILE_CHANGED=true
+fi
+if ! grep -q "${INSTALL_DIR}" "$PROFILE_D" 2>/dev/null; then
+    echo "export PATH=\"\$PATH:${INSTALL_DIR}\"" >> "$PROFILE_D"
+    PROFILE_CHANGED=true
+fi
+if ! grep -q "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT" "$PROFILE_D" 2>/dev/null; then
+    echo "export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1" >> "$PROFILE_D"
+    PROFILE_CHANGED=true
+fi
+if [ "$PROFILE_CHANGED" = "true" ]; then
+    echo_ok "已更新: $PROFILE_D"
+    echo_warn "请重新登录或执行 'source $PROFILE_D' 使 PATH 与环境变量生效"
 else
-    if grep -q "${INSTALL_DIR}" "$PROFILE_D" 2>/dev/null; then
-        echo_ok "已在 PATH 中，跳过"
-    else
-        echo "export PATH=\"\$PATH:${INSTALL_DIR}\"" >> "$PROFILE_D"
-        echo_ok "已追加到: $PROFILE_D"
-        echo_warn "请执行 'source $PROFILE_D' 使 PATH 生效"
-    fi
+    echo_ok "已在 PATH 中，跳过"
 fi
 
 # ── 验证与最终提示 ────────────────────────────────
@@ -287,11 +335,11 @@ if systemctl is-active --quiet "${SERVICE_NAME}"; then
 
     echo ""
     printf "%b  卸载方法%b\n" "$_C_CYAN" "$_C_RESET"
-    cmd_line "systemctl stop ${SERVICE_NAME}; systemctl disable ${SERVICE_NAME}"
-    cmd_line "rm -f /etc/systemd/system/${SERVICE_NAME}.service"
-    cmd_line "systemctl daemon-reload"
-    cmd_line "rm -rf ${INSTALL_DIR} ${DATA_DIR}"
-    cmd_line "rm -f /etc/profile.d/topssl-certguard-agent.sh"
+    cmd_line "[停止禁用服务]   systemctl stop ${SERVICE_NAME}; systemctl disable ${SERVICE_NAME}"
+    cmd_line "[删除服务文件]   rm -f /etc/systemd/system/${SERVICE_NAME}.service"
+    cmd_line "[重载服务配置]   systemctl daemon-reload"
+    cmd_line "[删除程序数据]   rm -rf ${INSTALL_DIR} ${DATA_DIR}"
+    cmd_line "[删除路径配置]   rm -f /etc/profile.d/topssl-certguard-agent.sh"
 
     echo ""
     printf "%b%s%b\n" "$_C_GREEN" "$LINE" "$_C_RESET"
@@ -304,7 +352,7 @@ else
     printf "%b  !   服务未运行，请排查以下问题：%b\n" "$_C_YELLOW" "$_C_RESET"
     printf "%b%s%b\n" "$_C_YELLOW" "$LINE" "$_C_RESET"
     echo "    1. 手动运行调试:"
-    printf "%b         ${AGENT_BIN} --data-dir ${DATA_DIR}%b\n" "$_C_WHITE" "$_C_RESET"
+    printf "%b         DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 ${AGENT_BIN} --data-dir ${DATA_DIR}%b\n" "$_C_WHITE" "$_C_RESET"
     echo "    2. 查看 systemd 日志:"
     printf "%b         journalctl -u ${SERVICE_NAME} -n 50%b\n" "$_C_WHITE" "$_C_RESET"
     echo "    3. 查看 Agent 文件日志:"

@@ -183,6 +183,12 @@ if (!string.IsNullOrEmpty(updateUrl))
         Console.WriteLine($"下载完成 ({bytes.Length / 1024.0:F1} KB)");
         Console.WriteLine("正在解压更新...");
 
+        // 保存当前 agent.json（恢复身份用）
+        var agentConfigPath = Path.Combine(dir, "agent.json");
+        var savedAgentConfig = "";
+        if (File.Exists(agentConfigPath))
+            savedAgentConfig = File.ReadAllText(agentConfigPath);
+
         // 备份当前版本（排除 agent.json）
         var backupDir = dir + $"_{DateTime.Now:yyyyMMddHHmmss}";
         Console.WriteLine($"  备份旧版本到: {backupDir}");
@@ -199,14 +205,9 @@ if (!string.IsNullOrEmpty(updateUrl))
         // 解压新版本
         ZipFile.ExtractToDirectory(zipPath, dir);
 
-        // 恢复配置文件（如果被覆盖）
-        var newConfig = Path.Combine(dir, "agent.json");
-        if (!File.Exists(newConfig))
-        {
-            var oldConfig = Path.Combine(backupDir, "agent.json");
-            if (File.Exists(oldConfig))
-                File.Copy(oldConfig, newConfig);
-        }
+        // 恢复配置文件（确保不被更新包中的 agent.json 覆盖）
+        if (!string.IsNullOrEmpty(savedAgentConfig))
+            File.WriteAllText(agentConfigPath, savedAgentConfig);
 
         // 确保 Linux 上可执行
         if (!OperatingSystem.IsWindows())

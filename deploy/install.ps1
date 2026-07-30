@@ -5,11 +5,12 @@
 
 # 兼容 iex 远程执行：param() 在 iex 中不生效，改用直接赋值
 $Token        = ""
+$KeepIdentity = $false
 $InstallDir   = "$env:ProgramFiles\TopSSL-CertGuard-Agent"
 $DataDir      = "$env:ProgramData\TopSSL-CertGuard-Agent"
 $Server       = "http://localhost:5003"
 
-$Script:Version     = "1.0.2"
+$Script:Version     = "1.0.5"
 $Script:ServiceName = "TopSSLCertGuardAgent"
 
 # ───────────────────────────────────────────────
@@ -159,16 +160,18 @@ function Show-DownloadProgress {
 # ───────────────────────────────────────────────
 function Install-CertGuardAgent {
     param(
-        [string]$Token      = $script:Token,
-        [string]$InstallDir = $script:InstallDir,
-        [string]$DataDir    = $script:DataDir,
-        [string]$Server     = $script:Server
+        [string]$Token        = $script:Token,
+        [switch]$KeepIdentity = $script:KeepIdentity,
+        [string]$InstallDir   = $script:InstallDir,
+        [string]$DataDir      = $script:DataDir,
+        [string]$Server       = $script:Server
     )
 
-    if ([string]::IsNullOrEmpty($Token)) {
+    if ([string]::IsNullOrEmpty($Token) -and -not $KeepIdentity) {
         Write-Host "[X] 错误: 需要 --token / -Token 参数" -ForegroundColor Red
         Write-Host "    用法: Install-CertGuardAgent -Token ct_reg_xxxxxx [-Server http://your-platform:port]"
         Write-Host "    或:   powershell ... install.ps1 -Token ct_reg_xxxxxx -Server http://your-platform:port"
+        Write-Host "    升级保留身份: Install-CertGuardAgent -KeepIdentity [-Server http://your-platform:port]"
         exit 1
     }
 
@@ -294,21 +297,53 @@ function Install-CertGuardAgent {
         exit 1
     }
 
-    Write-SubInfo "执行首次注册..."
-    $proc = Start-Process -FilePath $agentExe -ArgumentList "--token `"$Token`" --server `"$Server`" --data-dir `"$DataDir`" --register-only" -PassThru -NoNewWindow -Wait
-    if ($proc.ExitCode -ne 0) {
-        Write-Warn "注册失败（退出码: $($proc.ExitCode)），请检查 Token 是否有效。"
+    # 注册前身份处理（与 install.sh 对齐）。
+    # 默认: 清理旧 agent.json,强制用本次 -Token 全新注册。
+    #   原因:Agent 在 agent.json 已存在时会"加载旧身份并退出",忽略传入的 token,
+    #   导致换 token 重装后服务连不上平台("401 Agent 不存在"死循环)。
+    # -KeepIdentity: 保留现有身份(如仅升级二进制),此时 -Token 可省略。
+    $dataDirConfig    = "$DataDir\agent.json"
+    $installDirConfig = "$InstallDir\agent.json"
+    $hasExistingIdentity = (Test-Path $dataDirConfig) -or (Test-Path $installDirConfig)
+    $registerSkip = $false
+
+    if ($KeepIdentity) {
+        if ($hasExistingIdentity) {
+            Write-SubInfo "保留现有身份,跳过注册 (-KeepIdentity)"
+            $registerSkip = $true
+        }
+        else {
+            # 无现有身份,-KeepIdentity 无意义,回退到正常注册(此时必须有 -Token)
+            if ([string]::IsNullOrEmpty($Token)) {
+                Write-Err "-KeepIdentity 已指定,但未发现现有身份,且未提供 -Token,无法注册"
+                exit 1
+            }
+            Write-SubInfo "未发现现有身份,改用提供的 Token 全新注册"
+        }
     }
     else {
-        Write-OK "注册完成"
-
-        # 注册成功后，如果 DataDir 下有 agent.json 且安装目录还没有，复制一份到安装目录
-        $dataDirConfig    = "$DataDir\agent.json"
-        $installDirConfig = "$InstallDir\agent.json"
-        if ((Test-Path $dataDirConfig) -and !(Test-Path $installDirConfig)) {
-            Copy-Item -Path $dataDirConfig -Destination $installDirConfig -Force
-            Write-OK "配置文件已复制到: $installDirConfig"
+        # 默认: 清理旧身份,强制全新注册
+        if ($hasExistingIdentity) {
+            Remove-Item -Path $dataDirConfig, $installDirConfig -Force -ErrorAction SilentlyContinue
+            Write-SubInfo "已清理旧身份文件,将使用本次 Token 全新注册"
         }
+    }
+
+    if (-not $registerSkip) {
+        Write-SubInfo "执行首次注册..."
+        $proc = Start-Process -FilePath $agentExe -ArgumentList "--token `"$Token`" --server `"$Server`" --data-dir `"$DataDir`" --register-only" -PassThru -NoNewWindow -Wait
+        if ($proc.ExitCode -ne 0) {
+            Write-Warn "注册失败（退出码: $($proc.ExitCode)），请检查 Token 是否有效。"
+        }
+        else {
+            Write-OK "注册完成"
+        }
+    }
+
+    # 注册成功(或保留身份)后,如果 DataDir 下有 agent.json 且安装目录还没有,复制一份到安装目录
+    if ((Test-Path $dataDirConfig) -and !(Test-Path $installDirConfig)) {
+        Copy-Item -Path $dataDirConfig -Destination $installDirConfig -Force
+        Write-OK "配置文件已复制到: $installDirConfig"
     }
 
     # ── 5. 创建并启动 Windows 服务 ────────────────────

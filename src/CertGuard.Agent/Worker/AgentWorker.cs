@@ -415,6 +415,15 @@ private async Task PerformSelfUpdateAsync(string downloadUrl, CancellationToken 
         else
             ExtractTarGz(pkgPath, extractDir);
 
+        // 保存当前 agent.json，防止被更新包中的 agent.json 覆盖
+        var agentConfigPath = Path.Combine(exeDir, "agent.json");
+        var savedConfigTemp = "";
+        if (File.Exists(agentConfigPath))
+        {
+            savedConfigTemp = Path.Combine(Path.GetTempPath(), $"certguard_agent_{Guid.NewGuid():N}.json");
+            File.Copy(agentConfigPath, savedConfigTemp, overwrite: true);
+        }
+
         var backupDir = exeDir + "_backup_" + DateTime.Now.ToString("yyyyMMddHHmmss");
         _log.LogInformation("正在备份当前版本到 {BackupDir}", backupDir);
         Directory.CreateDirectory(backupDir);
@@ -430,9 +439,9 @@ private async Task PerformSelfUpdateAsync(string downloadUrl, CancellationToken 
         }
 
         if (OperatingSystem.IsWindows())
-            await WriteWindowsUpdateScript(exeDir, extractDir, ct);
+            await WriteWindowsUpdateScript(exeDir, extractDir, savedConfigTemp, ct);
         else
-            await WriteLinuxUpdateScript(exeDir, extractDir, ct);
+            await WriteLinuxUpdateScript(exeDir, extractDir, savedConfigTemp, ct);
 
         _log.LogInformation("更新就绪，正在启动更新脚本并停止 Agent...");
         StartUpdateScriptDetached(exeDir);
@@ -443,13 +452,17 @@ private async Task PerformSelfUpdateAsync(string downloadUrl, CancellationToken 
         try { if (File.Exists(pkgPath)) File.Delete(pkgPath); } catch { }
     }
 }
-private async Task WriteWindowsUpdateScript(string exeDir, string extractDir, CancellationToken ct)
+private async Task WriteWindowsUpdateScript(string exeDir, string extractDir, string savedConfigTemp, CancellationToken ct)
 {
     var scriptPath = Path.Combine(exeDir, "update.bat");
+    var restoreConfig = "";
+    if (!string.IsNullOrEmpty(savedConfigTemp))
+        restoreConfig = "copy /y \"" + savedConfigTemp + "\" \"" + Path.Combine(exeDir, "agent.json") + "\" > nul 2>&1\r\n";
     var bat = "@echo off\r\n"
             + "ping -n 6 127.0.0.1 > nul\r\n"
             + "echo [CertGuard] Copying new files...\r\n"
             + "xcopy /y /e /q \"" + extractDir + "\\*\" \"" + exeDir + "\\\" > nul 2>&1\r\n"
+            + restoreConfig
             + "echo [CertGuard] Starting service TopSSLCertGuardAgent...\r\n"
             + "sc start TopSSLCertGuardAgent > nul 2>&1 || sc start CertGuardAgent > nul 2>&1\r\n"
             + "echo [CertGuard] Update complete.\r\n"
@@ -458,13 +471,17 @@ private async Task WriteWindowsUpdateScript(string exeDir, string extractDir, Ca
     _log.LogInformation("更新脚本已写入: {Path}", scriptPath);
 }
 
-private async Task WriteLinuxUpdateScript(string exeDir, string extractDir, CancellationToken ct)
+private async Task WriteLinuxUpdateScript(string exeDir, string extractDir, string savedConfigTemp, CancellationToken ct)
 {
     var scriptPath = Path.Combine(exeDir, "update.sh");
+    var restoreConfig = "";
+    if (!string.IsNullOrEmpty(savedConfigTemp))
+        restoreConfig = "cp " + savedConfigTemp + " " + exeDir + "/agent.json\n";
     var sh = "#!/bin/bash\n"
             + "sleep 5\n"
             + "echo '[CertGuard] Copying new files...'\n"
             + "cp -rf " + extractDir + "/* " + exeDir + "/\n"
+            + restoreConfig
             + "chmod +x " + exeDir + "/certguard-agent\n"
             + "echo '[CertGuard] Starting service topssl-certguard-agent...'\n"
             + "systemctl restart topssl-certguard-agent 2>/dev/null || systemctl restart certguard-agent 2>/dev/null\n"
