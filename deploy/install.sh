@@ -196,6 +196,7 @@ ExecStart=${INSTALL_DIR}/certguard-agent --data-dir ${DATA_DIR}
 Restart=always
 RestartSec=10
 User=root
+KillMode=process
 Environment=DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
 
 [Install]
