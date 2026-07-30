@@ -122,7 +122,9 @@ private async Task Cycle(CancellationToken ct)
             // 确定当前系统架构
             string arch;
             if (OperatingSystem.IsWindows())
-                arch = "win-x64";
+                arch = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture
+                    == System.Runtime.InteropServices.Architecture.Arm64
+                    ? "win-arm64" : "win-x64";
             else if (OperatingSystem.IsLinux())
                 arch = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture
                     == System.Runtime.InteropServices.Architecture.Arm64
@@ -133,7 +135,8 @@ private async Task Cycle(CancellationToken ct)
                 return;
             }
 
-            var downloadUrl = _cfg.ApiBaseUrl.TrimEnd('/') + "/agent/certguard-agent-" + arch + ".zip";
+            var ext = OperatingSystem.IsWindows() ? ".zip" : ".tar.gz";
+            var downloadUrl = _cfg.ApiBaseUrl.TrimEnd('/') + "/agent/certguard-agent-" + arch + ext;
             await PerformSelfUpdateAsync(downloadUrl, ct);
             return;
         }
@@ -392,7 +395,9 @@ private async Task PerformSelfUpdateAsync(string downloadUrl, CancellationToken 
 {
     var exePath = Environment.GetCommandLineArgs()[0];
     var exeDir = Path.GetDirectoryName(exePath)!;
-    var zipPath = Path.Combine(Path.GetTempPath(), "certguard_update_" + Guid.NewGuid().ToString("N") + ".zip");
+    var isWindows = OperatingSystem.IsWindows();
+    var ext = isWindows ? ".zip" : ".tar.gz";
+    var pkgPath = Path.Combine(Path.GetTempPath(), "certguard_update_" + Guid.NewGuid().ToString("N") + ext);
     var extractDir = Path.Combine(Path.GetTempPath(), "certguard_extract_" + Guid.NewGuid().ToString("N"));
 
     try
@@ -401,12 +406,15 @@ private async Task PerformSelfUpdateAsync(string downloadUrl, CancellationToken 
 
         using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
         var bytes = await http.GetByteArrayAsync(downloadUrl, ct);
-        await File.WriteAllBytesAsync(zipPath, bytes, ct);
+        await File.WriteAllBytesAsync(pkgPath, bytes, ct);
 
         _log.LogInformation("下载完成（{Size} KB），正在解压...", bytes.Length / 1024);
 
         Directory.CreateDirectory(extractDir);
-        ZipFile.ExtractToDirectory(zipPath, extractDir);
+        if (isWindows)
+            ZipFile.ExtractToDirectory(pkgPath, extractDir);
+        else
+            ExtractTarGz(pkgPath, extractDir);
 
         var backupDir = exeDir + "_backup_" + DateTime.Now.ToString("yyyyMMddHHmmss");
         _log.LogInformation("正在备份当前版本到 {BackupDir}", backupDir);
@@ -433,7 +441,7 @@ private async Task PerformSelfUpdateAsync(string downloadUrl, CancellationToken 
     }
     finally
     {
-        try { if (File.Exists(zipPath)) File.Delete(zipPath); } catch { }
+        try { if (File.Exists(pkgPath)) File.Delete(pkgPath); } catch { }
     }
 }
 private async Task WriteWindowsUpdateScript(string exeDir, string extractDir, CancellationToken ct)
@@ -498,6 +506,25 @@ private void StartUpdateScriptDetached(string exeDir)
         });
     }
     _log.LogInformation("更新脚本已启动（独立进程）");
+}
+
+/// <summary>使用系统 tar 命令解压 .tar.gz 文件（仅 Linux）</summary>
+private static void ExtractTarGz(string tarGzPath, string destDir)
+{
+    using var proc = Process.Start(new ProcessStartInfo
+    {
+        FileName = "tar",
+        Arguments = $"-xzf \"{tarGzPath}\" -C \"{destDir}\"",
+        CreateNoWindow = true,
+        UseShellExecute = false,
+        RedirectStandardError = true
+    });
+    proc?.WaitForExit();
+    if (proc?.ExitCode != 0)
+    {
+        var err = proc?.StandardError.ReadToEnd() ?? "";
+        throw new InvalidOperationException($"tar 解压失败 (exit={proc?.ExitCode}): {err}");
+    }
 }
 
 private async Task EnsureIdentity(CancellationToken ct)
