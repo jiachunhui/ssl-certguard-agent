@@ -11,3 +11,7 @@
  **/[Oo]bj/
  .vs/
  *.sourcelink.json
+
+ /src/build/
+ /src/CertGuard.Agent/.publish/	
+/src/CertGuard.Agent/.publish
