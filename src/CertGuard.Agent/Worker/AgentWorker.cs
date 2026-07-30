@@ -334,7 +334,6 @@ private async Task DoDeployCert(TaskItem t, CancellationToken ct)
         return;
     }
 
-    var primaryDomain = payload.Domains[0];
     var certPem = payload.CertPem ?? "";
     var keyPem = payload.KeyPem ?? "";
     if (string.IsNullOrWhiteSpace(certPem) || string.IsNullOrWhiteSpace(keyPem))
@@ -343,7 +342,7 @@ private async Task DoDeployCert(TaskItem t, CancellationToken ct)
         return;
     }
 
-    var ok = await _deploy.DeployAsync(certPem, keyPem, payload.Domains, ct);
+    var (ok, deployedDomains) = await _deploy.DeployAsync(certPem, keyPem, payload.Domains, ct);
     if (!ok)
     {
         var errorMsg = _deploy.LastError ?? "证书部署失败";
@@ -360,7 +359,7 @@ private async Task DoDeployCert(TaskItem t, CancellationToken ct)
     }
 
     await _client.ReportAsync(t.TaskId, true,
-        JsonSerializer.Serialize(new { domain = primaryDomain, web = _deploy.Name }), null, ct);
+        JsonSerializer.Serialize(new { domains = deployedDomains, web = _deploy.Name }), null, ct);
 }
 
 private async Task DoUpdateAgent(TaskItem t, CancellationToken ct)

@@ -10,7 +10,8 @@ public interface IDeployProvider
 {
     string Name { get; }
     string? LastError { get; }
-    Task<bool> DeployAsync(string certPem, string keyPem, string[] domains, CancellationToken ct);
+    /// <summary>返回 (成功, 实际部署的域名列表)</summary>
+    Task<(bool ok, string[]? deployedDomains)> DeployAsync(string certPem, string keyPem, string[] domains, CancellationToken ct);
     Task<bool> ReloadAsync(CancellationToken ct);
     bool IsAvailable { get; }
 }
@@ -49,7 +50,7 @@ public class NginxProvider : IDeployProvider
     public NginxProvider(ILogger<NginxProvider> log, string? basePath = null)
     { _log = log; _base = basePath ?? "/etc/nginx/ssl"; }
 
-    public async Task<bool> DeployAsync(string certPem, string keyPem, string[] domains, CancellationToken ct)
+    public async Task<(bool ok, string[]? deployedDomains)> DeployAsync(string certPem, string keyPem, string[] domains, CancellationToken ct)
     {
         LastError = null;
         var primaryDomain = domains.Length > 0 ? domains[0] : "unknown";
@@ -73,7 +74,7 @@ public class NginxProvider : IDeployProvider
         {
             LastError = "Nginx 部署失败：未找到匹配的站点。跳过：" + string.Join("; ", skipped);
             _log.LogError("{Error}", LastError);
-            return false;
+            return (false, null);
         }
 
         foreach (var s in skipped)
@@ -87,7 +88,7 @@ public class NginxProvider : IDeployProvider
         var keyPath = Path.Combine(dir, "privkey.pem");
         if (OperatingSystem.IsLinux()) File.SetUnixFileMode(keyPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
         _log.LogInformation("Nginx 证书已写入: {Domain} -> {Dir}", primaryDomain, dir);
-        return true;
+        return (true, matched.ToArray());
     }
 
     public async Task<bool> ReloadAsync(CancellationToken ct)
@@ -190,15 +191,45 @@ public class ApacheProvider : IDeployProvider
     public ApacheProvider(ILogger<ApacheProvider> log, string? basePath = null)
     { _log = log; _base = basePath ?? "/etc/apache2/ssl"; }
 
-    public async Task<bool> DeployAsync(string certPem, string keyPem, string[] domains, CancellationToken ct)
+    public async Task<(bool ok, string[]? deployedDomains)> DeployAsync(string certPem, string keyPem, string[] domains, CancellationToken ct)
     {
-        var domain = domains.Length > 0 ? domains[0] : "unknown";
-        var dir = Path.Combine(_base, domain);
+        LastError = null;
+        var primaryDomain = domains.Length > 0 ? domains[0] : "unknown";
+
+        // 扫描 Apache 配置中的 ServerName / ServerAlias
+        var serverNames = await GetApacheServerNamesAsync(ct);
+        _log.LogInformation("Apache 中发现 {Count} 个主机名: {Names}", serverNames.Count, string.Join(", ", serverNames));
+
+        var matched = new List<string>();
+        var skipped = new List<string>();
+
+        foreach (var domain in domains)
+        {
+            if (serverNames.Contains(domain))
+                matched.Add(domain);
+            else
+                skipped.Add(domain + " -- Apache 上无站点服务此域名");
+        }
+
+        if (matched.Count == 0)
+        {
+            LastError = "Apache 部署失败：未找到匹配的站点。跳过：" + string.Join("; ", skipped);
+            _log.LogError("{Error}", LastError);
+            return (false, null);
+        }
+
+        foreach (var s in skipped)
+            _log.LogWarning("跳过域名: {Reason}", s);
+
+        // 写入证书
+        var dir = Path.Combine(_base, primaryDomain);
         Directory.CreateDirectory(dir);
         await File.WriteAllTextAsync(Path.Combine(dir, "certificate.crt"), certPem, ct);
         await File.WriteAllTextAsync(Path.Combine(dir, "private.key"), keyPem, ct);
-        _log.LogInformation("Apache 证书已写入: {Domain}", domain);
-        return true;
+        if (OperatingSystem.IsLinux())
+            File.SetUnixFileMode(Path.Combine(dir, "private.key"), UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        _log.LogInformation("Apache 证书已写入: {Domain} -> {Dir}", primaryDomain, dir);
+        return (true, matched.ToArray());
     }
 
     public async Task<bool> ReloadAsync(CancellationToken ct)
@@ -208,6 +239,103 @@ public class ApacheProvider : IDeployProvider
         if (ok) _log.LogInformation("Apache 重载完成");
         else _log.LogError("Apache 重载失败:\n{Text}", text);
         return ok;
+    }
+
+    // ---- Apache 站点扫描辅助方法 ----
+
+    private static List<string> GetApacheConfigFiles()
+    {
+        var files = new List<string>();
+        string[] searchDirs = { "/etc/apache2/sites-enabled", "/etc/httpd/conf.d" };
+        foreach (var dir in searchDirs)
+        {
+            if (!Directory.Exists(dir)) continue;
+            foreach (var f in Directory.GetFiles(dir))
+            {
+                var ext = Path.GetExtension(f);
+                if (string.IsNullOrEmpty(ext) || ext == ".conf")
+                    files.Add(f);
+            }
+        }
+        if (File.Exists("/etc/apache2/apache2.conf"))
+            files.Add("/etc/apache2/apache2.conf");
+        else if (File.Exists("/etc/httpd/conf/httpd.conf"))
+            files.Add("/etc/httpd/conf/httpd.conf");
+        return files;
+    }
+
+    private static HashSet<string> ParseApacheServerNames(string configText)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // ServerName directive
+        foreach (Match m in Regex.Matches(configText, @"ServerName\s+(\S+)", RegexOptions.IgnoreCase))
+        {
+            var name = m.Groups[1].Value.Trim();
+            if (!string.IsNullOrEmpty(name) && name != "localhost")
+                names.Add(name);
+        }
+        // ServerAlias directive (space-separated)
+        foreach (Match m in Regex.Matches(configText, @"ServerAlias\s+([^\n]+)", RegexOptions.IgnoreCase))
+        {
+            foreach (var alias in m.Groups[1].Value.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var trimmed = alias.Trim();
+                if (!string.IsNullOrEmpty(trimmed) && trimmed != "localhost")
+                    names.Add(trimmed);
+            }
+        }
+        return names;
+    }
+
+    private async Task<string?> ReadApacheFullConfigAsync(CancellationToken ct)
+    {
+        string[] bins = { "/usr/sbin/apache2ctl", "/usr/sbin/apache2", "/usr/sbin/httpd" };
+        foreach (var bin in bins)
+        {
+            if (!File.Exists(bin)) continue;
+            var (ok, output) = await Proc.Exec(bin, "-S", ct);
+            if (ok && !string.IsNullOrEmpty(output)) return output;
+        }
+        return null;
+    }
+
+    private static HashSet<string> ParseApacheCtlOutput(string output)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var line in output.Split('\n'))
+        {
+            // 去除配置文件路径（括号部分），避免误匹配路径中的域名
+            var clean = Regex.Replace(line, @"\([^)]+\)", "");
+            foreach (Match m in Regex.Matches(clean, @"\b([a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}\b"))
+            {
+                names.Add(m.Value);
+            }
+        }
+        return names;
+    }
+
+    private async Task<HashSet<string>> GetApacheServerNamesAsync(CancellationToken ct)
+    {
+        // 先尝试扫描配置文件
+        var files = GetApacheConfigFiles();
+        if (files.Count > 0)
+        {
+            var sb = new StringBuilder();
+            foreach (var f in files)
+            {
+                try { sb.AppendLine(await File.ReadAllTextAsync(f, ct)); }
+                catch (Exception ex) { _log.LogDebug("无法读取 {File}: {Error}", f, ex.Message); }
+            }
+            var names = ParseApacheServerNames(sb.ToString());
+            if (names.Count > 0) return names;
+        }
+
+        // 回退：使用 apache2ctl -S / httpd -S 导出虚拟主机配置
+        var fullConfig = await ReadApacheFullConfigAsync(ct);
+        if (!string.IsNullOrEmpty(fullConfig))
+            return ParseApacheCtlOutput(fullConfig);
+
+        return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     }
 }
 
@@ -235,7 +363,7 @@ public class IisProvider : IDeployProvider
         return ok;
     }
 
-    public async Task<bool> DeployAsync(string certPem, string keyPem, string[] domains, CancellationToken ct)
+    public async Task<(bool ok, string[]? deployedDomains)> DeployAsync(string certPem, string keyPem, string[] domains, CancellationToken ct)
     {
         LastError = null;
         var primaryDomain = domains.Length > 0 ? domains[0] : "unknown";
@@ -244,7 +372,7 @@ public class IisProvider : IDeployProvider
         if (pfxPath is null)
         {
             LastError = "创建 PFX 失败: " + primaryDomain;
-            return false;
+            return (false, null);
         }
 
         try
@@ -255,7 +383,7 @@ public class IisProvider : IDeployProvider
             {
                 LastError = "证书导入失败: " + text;
                 _log.LogError("certutil 导入失败:\n{Text}", text);
-                return false;
+                return (false, null);
             }
 
             var hash = GetCertThumbprint(pfxPath);
@@ -263,7 +391,7 @@ public class IisProvider : IDeployProvider
             {
                 LastError = "无法获取导入证书的指纹";
                 _log.LogError("无法从导入的 PFX 获取证书指纹");
-                return false;
+                return (false, null);
             }
 
             (ok, text) = await Proc.Exec(_appCmd, "list site", ct);
@@ -271,7 +399,7 @@ public class IisProvider : IDeployProvider
             {
                 LastError = "获取 IIS 站点列表失败: " + text;
                 _log.LogError("appcmd list site 失败:\n{Text}", text);
-                return false;
+                return (false, null);
             }
             var sites = ParseSites(text);
             _log.LogInformation("解析到 {Count} 个 IIS 站点", sites.Count);
@@ -297,6 +425,7 @@ public class IisProvider : IDeployProvider
 
             var updated = 0;
             var skipped = new List<string>();
+            var deployed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var domain in domains)
             {
@@ -345,24 +474,24 @@ public class IisProvider : IDeployProvider
                         _log.LogWarning("appcmd 启用 SNI 失败，跳过 SNI 设置: {Text}", sniText);
                     }
                     var (psOk, psText) = await Proc.Exec("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -Command \"" + psScript + "\"", ct);
-                    if (psOk) { updated++; }
+                    if (psOk) { updated++; deployed.Add(domain); }
                     else { _log.LogError("PowerShell 分配证书失败: {Text}", psText); skipped.Add(domain + "@" + siteName + " -- 分配证书失败"); }
                 }
             }
 
-            if (updated == 0)
+            if (deployed.Count == 0)
             {
                 var skipDetail = string.Join("; ", skipped);
                 LastError = "IIS 部署失败：未更新任何绑定。跳过：" + skipDetail;
                 _log.LogError("IIS 部署失败：未更新任何绑定。跳过：{Skipped}", skipDetail);
-                return false;
+                return (false, null);
             }
 
             _log.LogInformation(
-                "IIS 证书部署完成：{Domain}，哈希={Hash}。更新 {Updated} 个绑定，跳过 {SkippedCount} 个。",
-                primaryDomain, hash.Substring(0, Math.Min(8, hash.Length)), updated, skipped.Count);
+                "IIS 证书部署完成：{Domains}，哈希={Hash}。更新 {Updated} 个绑定，跳过 {SkippedCount} 个。",
+                string.Join(", ", deployed), hash.Substring(0, Math.Min(8, hash.Length)), updated, skipped.Count);
 
-            return true;
+            return (true, deployed.ToArray());
         }
         finally
         {
