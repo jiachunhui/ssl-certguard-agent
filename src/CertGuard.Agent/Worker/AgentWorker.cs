@@ -496,10 +496,12 @@ private void StartUpdateScriptDetached(string exeDir)
     else
     {
         var scriptPath = Path.Combine(exeDir, "update.sh");
+        // 使用 systemd-run --scope 将更新脚本运行在独立的 cgroup 中，
+        // 避免 Agent 退出时 systemd KillMode=control-group 误杀脚本
         Process.Start(new ProcessStartInfo
         {
-            FileName = "/bin/bash",
-            Arguments = scriptPath,
+            FileName = "systemd-run",
+            Arguments = "--scope --quiet --collect /bin/bash " + scriptPath,
             CreateNoWindow = true,
             UseShellExecute = false
         });
