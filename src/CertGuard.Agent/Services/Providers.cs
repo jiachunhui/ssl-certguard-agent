@@ -1,4 +1,5 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
+using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -43,20 +44,49 @@ public class NginxProvider : IDeployProvider
 
     private readonly ILogger<NginxProvider> _log;
     private readonly string _base;
+    private string? _nginxBin;
 
     public NginxProvider(ILogger<NginxProvider> log, string? basePath = null)
     { _log = log; _base = basePath ?? "/etc/nginx/ssl"; }
 
     public async Task<bool> DeployAsync(string certPem, string keyPem, string[] domains, CancellationToken ct)
     {
-        var domain = domains.Length > 0 ? domains[0] : "unknown";
-        var dir = Path.Combine(_base, domain);
+        LastError = null;
+        var primaryDomain = domains.Length > 0 ? domains[0] : "unknown";
+
+        // 扫描 Nginx 配置中的 server_name
+        var serverNames = await GetServerNamesAsync(ct);
+        _log.LogInformation("Nginx 中发现 {Count} 个 server_name: {Names}", serverNames.Count, string.Join(", ", serverNames));
+
+        var matched = new List<string>();
+        var skipped = new List<string>();
+
+        foreach (var domain in domains)
+        {
+            if (serverNames.Contains(domain))
+                matched.Add(domain);
+            else
+                skipped.Add(domain + " -- Nginx 上无站点服务此域名");
+        }
+
+        if (matched.Count == 0)
+        {
+            LastError = "Nginx 部署失败：未找到匹配的站点。跳过：" + string.Join("; ", skipped);
+            _log.LogError("{Error}", LastError);
+            return false;
+        }
+
+        foreach (var s in skipped)
+            _log.LogWarning("跳过域名: {Reason}", s);
+
+        // 写入证书
+        var dir = Path.Combine(_base, primaryDomain);
         Directory.CreateDirectory(dir);
         await File.WriteAllTextAsync(Path.Combine(dir, "fullchain.pem"), certPem, ct);
         await File.WriteAllTextAsync(Path.Combine(dir, "privkey.pem"), keyPem, ct);
         var keyPath = Path.Combine(dir, "privkey.pem");
         if (OperatingSystem.IsLinux()) File.SetUnixFileMode(keyPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-        _log.LogInformation("Nginx 证书已写入: {Domain} -> {Dir}", domain, dir);
+        _log.LogInformation("Nginx 证书已写入: {Domain} -> {Dir}", primaryDomain, dir);
         return true;
     }
 
@@ -68,6 +98,83 @@ public class NginxProvider : IDeployProvider
         if (ok) _log.LogInformation("Nginx 重载完成");
         else _log.LogError("Nginx 重载失败:\n{Text}", text);
         return ok;
+    }
+
+    // ---- 以下为 Nginx 站点扫描辅助方法 ----
+
+    private static List<string> GetNginxConfigFiles()
+    {
+        var files = new List<string>();
+        string[] searchDirs = { "/etc/nginx/sites-enabled", "/etc/nginx/conf.d" };
+        foreach (var dir in searchDirs)
+        {
+            if (!Directory.Exists(dir)) continue;
+            foreach (var f in Directory.GetFiles(dir))
+            {
+                var ext = Path.GetExtension(f);
+                if (string.IsNullOrEmpty(ext) || ext == ".conf")
+                    files.Add(f);
+            }
+        }
+        if (File.Exists("/etc/nginx/nginx.conf"))
+            files.Add("/etc/nginx/nginx.conf");
+        return files;
+    }
+
+    private static HashSet<string> ParseServerNames(string configText)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var regex = new Regex(@"server_name\s+([^;]+);", RegexOptions.IgnoreCase);
+        foreach (Match m in regex.Matches(configText))
+        {
+            foreach (var name in m.Groups[1].Value.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var trimmed = name.Trim();
+                if (!string.IsNullOrEmpty(trimmed) && trimmed != "_")
+                    names.Add(trimmed);
+            }
+        }
+        return names;
+    }
+
+    private async Task<string?> ReadNginxFullConfigAsync(CancellationToken ct)
+    {
+        var bin = _nginxBin ??= FindNginxBin();
+        if (bin is null) return null;
+        var (ok, output) = await Proc.Exec(bin, "-T", ct);
+        return ok ? output : null;
+    }
+
+    private static string? FindNginxBin()
+    {
+        string[] paths = { "/usr/sbin/nginx", "/usr/bin/nginx", "/usr/local/nginx/sbin/nginx" };
+        foreach (var p in paths)
+            if (File.Exists(p)) return p;
+        return null;
+    }
+
+    private async Task<HashSet<string>> GetServerNamesAsync(CancellationToken ct)
+    {
+        // 先尝试扫描配置文件
+        var files = GetNginxConfigFiles();
+        if (files.Count > 0)
+        {
+            var sb = new StringBuilder();
+            foreach (var f in files)
+            {
+                try { sb.AppendLine(await File.ReadAllTextAsync(f, ct)); }
+                catch (Exception ex) { _log.LogDebug("无法读取 {File}: {Error}", f, ex.Message); }
+            }
+            var names = ParseServerNames(sb.ToString());
+            if (names.Count > 0) return names;
+        }
+
+        // 回退：使用 nginx -T 导出完整配置
+        var fullConfig = await ReadNginxFullConfigAsync(ct);
+        if (!string.IsNullOrEmpty(fullConfig))
+            return ParseServerNames(fullConfig);
+
+        return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     }
 }
 
