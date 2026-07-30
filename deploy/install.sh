@@ -162,10 +162,26 @@ else
     exit 1
 fi
 
+# --keep-identity 模式下，解压前先备份 InstallDir 的 agent.json
+# （InstallDir 的配置可能比 DataDir 更新，因为 --update-secret / PersistConfig 优先写入 InstallDir）
+SAVED_AGENT_JSON=""
+INSTALL_DIR_CONFIG="${INSTALL_DIR}/agent.json"
+DATA_DIR_CONFIG="${DATA_DIR}/agent.json"
+if [ "$KEEP_IDENTITY" = "true" ] && [ -f "$INSTALL_DIR_CONFIG" ]; then
+    SAVED_AGENT_JSON=$(cat "$INSTALL_DIR_CONFIG")
+    echo_sub_info "已备份现有配置文件 (InstallDir)"
+fi
+
 tar xzf "${TAR_PATH}" -C "${INSTALL_DIR}"
 chmod +x "${INSTALL_DIR}/certguard-agent"
 rm -f "${TAR_PATH}"
 echo_ok "解压完成"
+
+# --keep-identity: 恢复 InstallDir 的 agent.json（从解压前备份的内容）
+if [ -n "$SAVED_AGENT_JSON" ]; then
+    echo "$SAVED_AGENT_JSON" > "$INSTALL_DIR_CONFIG"
+    echo_ok "已恢复配置文件到: $INSTALL_DIR_CONFIG"
+fi
 
 # ── 4. 首次注册 ──────────────────────────────────
 echo_step 4 $TOTAL_STEPS "注册 Agent..."
@@ -181,10 +197,8 @@ fi
 #   原因:Agent 在 agent.json 已存在时会"加载旧身份并退出",忽略传入的 token,
 #   导致换 token 重装后服务连不上平台("401 Agent 不存在"死循环)。
 # --keep-identity: 保留现有身份(如仅升级二进制),此时 --token 可省略。
-OLD_AGENT_JSON_DATA="${DATA_DIR}/agent.json"
-OLD_AGENT_JSON_INST="${INSTALL_DIR}/agent.json"
 HAS_EXISTING_IDENTITY=false
-if [ -f "$OLD_AGENT_JSON_DATA" ] || [ -f "$OLD_AGENT_JSON_INST" ]; then
+if [ -f "$DATA_DIR_CONFIG" ] || [ -f "$INSTALL_DIR_CONFIG" ]; then
     HAS_EXISTING_IDENTITY=true
 fi
 REGISTER_SKIP=false
@@ -204,7 +218,7 @@ if [ "$KEEP_IDENTITY" = "true" ]; then
 else
     # 默认: 清理旧身份,强制全新注册
     if [ "$HAS_EXISTING_IDENTITY" = "true" ]; then
-        rm -f "$OLD_AGENT_JSON_DATA" "$OLD_AGENT_JSON_INST"
+        rm -f "$DATA_DIR_CONFIG" "$INSTALL_DIR_CONFIG"
         echo_sub_info "已清理旧身份文件,将使用本次 Token 全新注册"
     fi
 fi
@@ -218,12 +232,19 @@ if [ "$REGISTER_SKIP" != "true" ]; then
     fi
 fi
 
-# 注册成功后，如果 DataDir 下有 agent.json 且安装目录还没有，复制一份到安装目录
-DATA_DIR_CONFIG="${DATA_DIR}/agent.json"
-INSTALL_DIR_CONFIG="${INSTALL_DIR}/agent.json"
-if [ -f "$DATA_DIR_CONFIG" ] && [ ! -f "$INSTALL_DIR_CONFIG" ]; then
-    cp "$DATA_DIR_CONFIG" "$INSTALL_DIR_CONFIG"
-    echo_ok "配置文件已复制到: $INSTALL_DIR_CONFIG"
+# 同步 agent.json 到两个位置
+if [ "$KEEP_IDENTITY" = "true" ]; then
+    # KeepIdentity: InstallDir 已有最新配置（从备份恢复），同步到 DataDir
+    if [ -f "$INSTALL_DIR_CONFIG" ] && [ ! -f "$DATA_DIR_CONFIG" ]; then
+        cp "$INSTALL_DIR_CONFIG" "$DATA_DIR_CONFIG"
+        echo_ok "配置文件已同步到: $DATA_DIR_CONFIG"
+    fi
+else
+    # 正常注册: DataDir 有最新配置（PersistConfig 写入），同步到 InstallDir
+    if [ -f "$DATA_DIR_CONFIG" ] && [ ! -f "$INSTALL_DIR_CONFIG" ]; then
+        cp "$DATA_DIR_CONFIG" "$INSTALL_DIR_CONFIG"
+        echo_ok "配置文件已复制到: $INSTALL_DIR_CONFIG"
+    fi
 fi
 
 # ── 5. 创建 systemd 服务 ─────────────────────────

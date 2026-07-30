@@ -278,6 +278,16 @@ function Install-CertGuardAgent {
     }
     Write-OK "下载完成"
 
+    # -KeepIdentity 模式下，清空 InstallDir 前先备份 InstallDir 的 agent.json
+    # （InstallDir 的配置可能比 DataDir 更新，因为 --update-secret / PersistConfig 优先写入 InstallDir）
+    $savedAgentJson = $null
+    $installDirConfig = "$InstallDir\agent.json"
+    $dataDirConfig    = "$DataDir\agent.json"
+    if ($KeepIdentity -and (Test-Path $installDirConfig)) {
+        $savedAgentJson = Get-Content -Path $installDirConfig -Raw
+        Write-SubInfo "已备份现有配置文件 (InstallDir)"
+    }
+
     # 解压前先清理旧文件（此时服务已停止，文件不再被锁定）
     if (Test-Path $InstallDir) {
         Get-ChildItem -Path $InstallDir -Recurse | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
@@ -287,6 +297,12 @@ function Install-CertGuardAgent {
     Expand-Archive -Path $zipPath -DestinationPath $InstallDir -Force
     Remove-Item -Path $zipPath -Force
     Write-OK "解压完成"
+
+    # -KeepIdentity: 恢复 InstallDir 的 agent.json（从清空前备份的内容）
+    if ($savedAgentJson) {
+        Set-Content -Path $installDirConfig -Value $savedAgentJson -NoNewline
+        Write-OK "已恢复配置文件到: $installDirConfig"
+    }
 
     # ── 4. 首次注册 ───────────────────────────────────
     Write-Step -Message "注册 Agent..." -Step 5 -Total $totalSteps
@@ -302,8 +318,6 @@ function Install-CertGuardAgent {
     #   原因:Agent 在 agent.json 已存在时会"加载旧身份并退出",忽略传入的 token,
     #   导致换 token 重装后服务连不上平台("401 Agent 不存在"死循环)。
     # -KeepIdentity: 保留现有身份(如仅升级二进制),此时 -Token 可省略。
-    $dataDirConfig    = "$DataDir\agent.json"
-    $installDirConfig = "$InstallDir\agent.json"
     $hasExistingIdentity = (Test-Path $dataDirConfig) -or (Test-Path $installDirConfig)
     $registerSkip = $false
 
@@ -340,10 +354,20 @@ function Install-CertGuardAgent {
         }
     }
 
-    # 注册成功(或保留身份)后,如果 DataDir 下有 agent.json 且安装目录还没有,复制一份到安装目录
-    if ((Test-Path $dataDirConfig) -and !(Test-Path $installDirConfig)) {
-        Copy-Item -Path $dataDirConfig -Destination $installDirConfig -Force
-        Write-OK "配置文件已复制到: $installDirConfig"
+    # 同步 agent.json 到两个位置
+    if ($KeepIdentity) {
+        # KeepIdentity: InstallDir 已有最新配置（从备份恢复），同步到 DataDir
+        if ((Test-Path $installDirConfig) -and !(Test-Path $dataDirConfig)) {
+            Copy-Item -Path $installDirConfig -Destination $dataDirConfig -Force
+            Write-OK "配置文件已同步到: $dataDirConfig"
+        }
+    }
+    else {
+        # 正常注册: DataDir 有最新配置（PersistConfig 写入），同步到 InstallDir
+        if ((Test-Path $dataDirConfig) -and !(Test-Path $installDirConfig)) {
+            Copy-Item -Path $dataDirConfig -Destination $installDirConfig -Force
+            Write-OK "配置文件已复制到: $installDirConfig"
+        }
     }
 
     # ── 5. 创建并启动 Windows 服务 ────────────────────

@@ -593,13 +593,6 @@ private async Task EnsureIdentity(CancellationToken ct)
 
 private void PersistConfig()
 {
-    var dir = !string.IsNullOrEmpty(_cfg.ConfigWritePath)
-        ? Path.GetDirectoryName(_cfg.ConfigWritePath)!
-        : _cfg.DataDir;
-    var path = !string.IsNullOrEmpty(_cfg.ConfigWritePath)
-        ? _cfg.ConfigWritePath
-        : Path.Combine(_cfg.DataDir, "agent.json");
-
     var json = JsonSerializer.Serialize(new
     {
         api_base_url = _cfg.ApiBaseUrl,
@@ -609,13 +602,26 @@ private void PersistConfig()
         data_dir = _cfg.DataDir
     }, new JsonSerializerOptions { WriteIndented = true });
 
-    Directory.CreateDirectory(dir);
-    File.WriteAllText(path, json);
-
+    // 始终写入 DataDir
+    Directory.CreateDirectory(_cfg.DataDir);
+    var dataPath = Path.Combine(_cfg.DataDir, "agent.json");
+    File.WriteAllText(dataPath, json);
     if (OperatingSystem.IsLinux())
-        File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        File.SetUnixFileMode(dataPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
 
-    _log.LogInformation("配置已保存到: {Path}", path);
+    // 同步写入 InstallDir（与 DataDir 保持双向同步，防止 -KeepIdentity 重装时用过期配置覆盖）
+    var exeDir = Path.GetDirectoryName(Environment.GetCommandLineArgs()[0]) ?? ".";
+    var installPath = Path.Combine(exeDir, "agent.json");
+    if (!string.Equals(installPath, dataPath, StringComparison.OrdinalIgnoreCase))
+    {
+        Directory.CreateDirectory(exeDir);
+        File.WriteAllText(installPath, json);
+        if (OperatingSystem.IsLinux())
+            File.SetUnixFileMode(installPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        _log.LogInformation("配置已同步到: {Path}", installPath);
+    }
+
+    _log.LogInformation("配置已保存到: {Path}", dataPath);
 }
 
 /// <summary>从本地网络接口获取 IPv4 地址（排除回环/隧道/虚拟网卡）</summary>
