@@ -79,7 +79,44 @@
 
  ### Q: Agent 占用多少资源？
 
- Agent 非常轻量，空闲时内存占用约 20 MB，CPU 占用几乎为 0。
+Agent 非常轻量，空闲时内存占用约 20 MB，CPU 占用几乎为 0。
+
+### Q: 心跳正常但日志中反复出现失败错误？
+
+如果你在日志中看到类似以下的循环错误，但心跳一直正常发送、服务状态为 `active (running)`、证书部署功能也不受影响：
+
+```log
+[ERR] 获取任务失败: ...
+[ERR] 心跳响应异常: ...
+```
+
+**这是非致命问题，不需要紧急处理。** 本质是 Agent 二进制或运行环境出现微小不一致（如文件损坏、依赖缺失、权限变动等），导致某条代码路径异常，但核心通信和部署逻辑仍然正常。每分钟刷一条失败日志只是"噪音"，不影响实际功能。
+
+#### "不修改配置"的含义
+
+"不修改配置"指的是保留 `agent.json` 中的现有身份（`agent_id` 和 `agent_secret`），**不重新注册**。只要当前身份还能正常心跳（平台回包正常），就可以安全保留。
+
+#### 修复方法：重装并保留身份
+
+使用 `install.sh` v1.0.4 及以上版本提供的 `--keep-identity` 参数，可以在保留现有身份的前提下，重新下载并替换 Agent 二进制文件、重建 systemd 服务：
+
+```bash
+curl -fsSL https://www.topssl.cn/agent/install.sh | sudo bash -s -- \
+  --token ct_reg_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
+  --server https://www.topssl.cn \
+  --keep-identity
+```
+
+执行过程：
+1. 停止旧服务
+2. 下载最新 Agent 二进制文件
+3. **跳过注册步骤**（保留现有 `agent.json`）
+4. 重建 systemd 服务
+5. 启动服务
+
+> **前提条件**：服务器上的 `install.sh` 必须是 **v1.0.4 或更高版本**。如果当前是 v1.0.3 或更早版本，`--keep-identity` 参数会被 `*) shift` 忽略而不生效，导致仍然走默认的强制重注册流程。
+
+> **注意**：v1.0.4 及以上版本的 `install.sh` 在**不加** `--keep-identity` 时，默认会清理旧身份并强制重新注册。因此执行时必须显式带上 `--keep-identity` 参数。
 
  ## 证书部署相关
 
