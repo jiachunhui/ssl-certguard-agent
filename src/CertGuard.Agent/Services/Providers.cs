@@ -621,6 +621,19 @@ public class IisProvider : IDeployProvider
     }
 }
 
+public class NoopProvider : IDeployProvider
+{
+    public string Name => "none";
+    public string? LastError => null;
+    public bool IsAvailable => false;
+
+    public Task<(bool ok, string[]? deployedDomains)> DeployAsync(string certPem, string keyPem, string[] domains, CancellationToken ct)
+        => Task.FromResult((false, (string[]?)null));
+
+    public Task<bool> ReloadAsync(CancellationToken ct)
+        => Task.FromResult(false);
+}
+
 public class ProviderFactory
 {
     private readonly ILoggerFactory _logFactory;
@@ -649,7 +662,7 @@ public class ProviderFactory
             if (apache.IsAvailable) return (apache, osType, osVer);
         }
 
-        throw new InvalidOperationException("未找到可用的部署提供程序");
+        return (new NoopProvider(), osType, osVer);
     }
 
     private static string GetOsType()

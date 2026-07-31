@@ -52,6 +52,12 @@ public class AgentWorker : BackgroundService
                 _life.StopApplication();
                 return;
             }
+            if (!_deploy.IsAvailable)
+            {
+                _log.LogCritical("未检测到任何可用的 Web 服务器（Nginx/Apache/IIS），Agent 无法运行");
+                _life.StopApplication();
+                return;
+            }
             await SafeReportEnv(ct);
             _log.LogInformation("就绪。Web={Web}, 系统={Os}, 心跳={Hb}s", _deploy.Name, _osType, _cfg.HeartbeatSec);
             while (!ct.IsCancellationRequested)
