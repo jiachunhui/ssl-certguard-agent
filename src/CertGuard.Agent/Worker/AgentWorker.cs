@@ -56,6 +56,25 @@ public class AgentWorker : BackgroundService
             }
             while (!_deploy.IsAvailable)
             {
+                // 上报环境状态（仅首次）和心跳，让平台感知 Agent 在线
+                try
+                {
+                    if (!_envReported)
+                    {
+                        await _client.ReportEnvAsync(new EnvReport
+                        {
+                            OsType = _osType,
+                            OsVersion = _osVer,
+                            WebServer = "none",
+                            IpAddress = GetLocalIpAddress()
+                        }, ct);
+                        _envReported = true;
+                        _log.LogInformation("环境已上报（等待 Web 服务器安装...）");
+                    }
+                    await _client.PingAsync(_version, ct);
+                }
+                catch (HttpRequestException) { /* 下次重试 */ }
+
                 _log.LogWarning("未检测到 Web 服务器（Nginx/Apache/IIS），{Sec}s 后重试...", _cfg.HeartbeatSec);
                 await Task.Delay(_cfg.HeartbeatSec * 1000, ct);
                 var (newProvider, newOsType, newOsVer) = _factory.Create();
