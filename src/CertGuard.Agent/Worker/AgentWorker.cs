@@ -72,6 +72,26 @@ public class AgentWorker : BackgroundService
                         _log.LogInformation("环境已上报（等待 Web 服务器安装...）");
                     }
                     await _client.PingAsync(_version, ct);
+
+                    // 拉取并处理任务：卸载/更新/健康上报可以直接执行，部署任务返回失败原因
+                    var tasks = await _client.FetchTasksAsync(ct);
+                    foreach (var t in tasks)
+                    {
+                        if (t.TaskType == "deploy_cert")
+                        {
+                            _log.LogWarning("任务 #{Id} deploy_cert 拒绝: 未检测到 Web 服务器", t.TaskId);
+                            try
+                            {
+                                await _client.ReportAsync(t.TaskId, false, null,
+                                    "未检测到可用的 Web 服务器（Nginx/Apache/IIS），请先安装 Web 服务器后再部署", ct);
+                            }
+                            catch { /* 忽略上报错误 */ }
+                        }
+                        else
+                        {
+                            await DoTask(t, ct);
+                        }
+                    }
                 }
                 catch (HttpRequestException) { /* 下次重试 */ }
 
