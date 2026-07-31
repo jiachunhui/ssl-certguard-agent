@@ -583,6 +583,12 @@ private async Task EnsureIdentity(CancellationToken ct)
         }
         catch (InvalidOperationException ex)
         {
+            if (_cfg.RegisterOnly)
+            {
+                _log.LogError("注册令牌无效或已过期，仅注册模式下不重试。请前往 TOPSSL.CN 控制台重新生成令牌后重试。错误: {Error}", ex.Message);
+                _life.StopApplication();
+                return;
+            }
             _log.LogWarning("注册失败（业务拒绝）: {Error}，将在 {Delay} 秒后重试...", ex.Message,
                 (int)retryDelay.TotalSeconds);
             await Task.Delay(retryDelay, ct);
