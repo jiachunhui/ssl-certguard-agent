@@ -60,6 +60,37 @@ function Format-Bytes {
     else                    { return "$Bytes B" }
 }
 
+# ----------------------------------------------------------------------
+# 临时目录选择与空间检查
+# 优先级: $env:TMPDIR > $env:TEMP > [System.IO.Path]::GetTempPath()
+# ----------------------------------------------------------------------
+function Select-TempDir {
+    param([string]$InstallDir)
+
+    $minSpace = 200 * 1MB
+    $candidates = @()
+
+    if ($env:TMPDIR -and (Test-Path $env:TMPDIR)) {
+        $candidates += $env:TMPDIR
+    }
+    if ($env:TEMP) { $candidates += $env:TEMP }
+    $candidates += [System.IO.Path]::GetTempPath()
+
+    foreach ($dir in $candidates) {
+        $dir = $dir.TrimEnd('\')
+        New-Item -ItemType Directory -Force -Path $dir -ErrorAction SilentlyContinue | Out-Null
+        if (-not (Test-Path $dir)) { continue }
+        try {
+            $drive = (Get-Item $dir).PSDrive
+            if ($drive.Free -ge $minSpace) {
+                return $dir
+            }
+        }
+        catch { continue }
+    }
+    return $null
+}
+
 # 流式下载 + 进度条（百分比 / 已下载·总大小 / 速率 / ETA）+ 里程碑兜底
 function Show-DownloadProgress {
     param(
@@ -262,20 +293,71 @@ function Install-CertGuardAgent {
 
     $baseUrl      = $Server.TrimEnd('/')
     $downloadUrl  = "$baseUrl/agent/certguard-agent-$arch.zip"
-    $zipPath      = Join-Path $env:TEMP "certguard-agent.zip"
 
-    Write-SubInfo "下载地址: $downloadUrl"
-    Write-SubInfo "开始下载，请稍候..."
-    try {
-        # 注意：此处不再设置 $ProgressPreference='SilentlyContinue'
-        # 该设置会同时屏蔽 Write-Progress，导致自定义进度条也不显示
-        Show-DownloadProgress -Url $downloadUrl -OutFile $zipPath
-    }
-    catch {
-        Write-Progress -Activity "下载 Agent 二进制文件" -Completed
-        Write-Err "下载失败: $_"
+    # 选择临时下载目录（优先级: $env:TMPDIR > $InstallDir\.tmp > $env:TEMP > 系统临时目录）
+    $tempDir = Select-TempDir -InstallDir $InstallDir
+    if (-not $tempDir) {
+        Write-Err "所有候选临时目录空间均不足（需要至少 200 MB）"
+        Write-Err ""
+        Write-Err "请尝试以下任一方法后重试:"
+        Write-Err "  1. 设置 TMPDIR 环境变量指向空间充足的分区:"
+        Write-Err "     `$env:TMPDIR='D:\Temp'; .\install.ps1 -Token ct_reg_xxx"
+        Write-Err "  2. 清理临时目录: Remove-Item `$env:TEMP\* -Recurse -Force"
         exit 1
     }
+
+    $zipPath = Join-Path $tempDir "certguard-agent.zip"
+
+    Write-SubInfo "下载地址: $downloadUrl"
+    Write-SubInfo "临时目录: $tempDir"
+    Write-SubInfo "开始下载，请稍候..."
+
+    try {
+        Show-DownloadProgress -Url $downloadUrl -OutFile $zipPath
+
+        if (-not (Test-Path $zipPath)) {
+            throw "下载文件不存在: $zipPath"
+        }
+
+        $fileSize = Format-Bytes ((Get-Item $zipPath).Length)
+        Write-SubInfo "文件大小: $fileSize"
+
+        # 下载并校验 SHA256（服务器可能未提供 .sha256 文件，此时跳过校验而非报错）
+        Write-SubInfo "校验文件完整性..."
+        $shaUrl = "${downloadUrl}.sha256"
+        try {
+            $shaResponse = Invoke-WebRequest -Uri $shaUrl -UseBasicParsing -ErrorAction Stop
+            $expectedHash = ($shaResponse.Content.Trim() -split '\s+')[0].ToLower()
+            if ($expectedHash) {
+                $actualHash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLower()
+                if ($expectedHash -ne $actualHash) {
+                    throw "SHA256 校验失败! 期望: $expectedHash, 实际: $actualHash. 安装包可能已损坏或被篡改."
+                }
+                Write-OK "SHA256 校验通过 ($expectedHash)"
+            }
+            else {
+                Write-Warn "SHA256 校验文件为空，跳过校验"
+            }
+        }
+        catch [System.Net.WebException] {
+            Write-Warn "无法获取 SHA256 校验文件（服务器可能未提供），跳过校验"
+        }
+        catch {
+            Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+            Write-Progress -Activity "下载 Agent 二进制文件" -Completed
+            Write-Err "SHA256 校验失败: $($_.Exception.Message)"
+            Write-Err "安装已中止，请重新下载或联系技术支持."
+            exit 1
+        }
+    }
+    catch {
+        Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+        Write-Progress -Activity "下载 Agent 二进制文件" -Completed
+        Write-Err "下载失败: $($_.Exception.Message)"
+        Write-Err "提示: 检查服务器是否可达: Invoke-WebRequest -Uri $Server -UseBasicParsing"
+        exit 1
+    }
+
     Write-OK "下载完成"
 
     # -KeepIdentity 模式下，清空 InstallDir 前先备份 InstallDir 的 agent.json
@@ -294,8 +376,12 @@ function Install-CertGuardAgent {
     }
 
     Write-SubInfo "解压到 $InstallDir"
-    Expand-Archive -Path $zipPath -DestinationPath $InstallDir -Force
-    Remove-Item -Path $zipPath -Force
+    try {
+        Expand-Archive -Path $zipPath -DestinationPath $InstallDir -Force
+    }
+    finally {
+        Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+    }
     Write-OK "解压完成"
 
     # -KeepIdentity: 恢复 InstallDir 的 agent.json（从清空前备份的内容）

@@ -185,6 +185,18 @@ foreach ($rid in $Rids) {
 
     $sizeMB = "{0:N2}" -f ((Get-Item $pkg).Length / 1MB)
     W Green ("  产物: $pkg  ($sizeMB MB)")
+
+    # 生成 SHA256 校验文件（与包同名 + .sha256 后缀）
+    $shaPath = "$pkg.sha256"
+    try {
+        $hash = (Get-FileHash -Path $pkg -Algorithm SHA256).Hash
+        # 格式：<hash>  <filename>（与 sha256sum 输出一致，两个空格分隔）
+        "$hash  $(Split-Path $pkg -Leaf)" | Set-Content -Path $shaPath -NoNewline
+        W Green "  SHA256: $shaPath"
+    }
+    catch {
+        W Yellow "  [!] SHA256 生成失败: $($_.Exception.Message)"
+    }
 }
 
 # ---- 6. 汇总 ----
@@ -197,6 +209,10 @@ Get-ChildItem $DistDirAbs -File | Sort-Object Name | ForEach-Object {
 W Gray ""
 W Gray "上传放置(对应脚本里的下载路径):"
 W Gray "  {服务器Web根}/agent/certguard-agent-linux-x64.tar.gz"
+W Gray "  {服务器Web根}/agent/certguard-agent-linux-x64.tar.gz.sha256"
 W Gray "  {服务器Web根}/agent/certguard-agent-linux-arm64.tar.gz"
+W Gray "  {服务器Web根}/agent/certguard-agent-linux-arm64.tar.gz.sha256"
 W Gray "  {服务器Web根}/agent/certguard-agent-win-x64.zip"
+W Gray "  {服务器Web根}/agent/certguard-agent-win-x64.zip.sha256"
 W Gray "  {服务器Web根}/agent/certguard-agent-win-arm64.zip"
+W Gray "  {服务器Web根}/agent/certguard-agent-win-arm64.zip.sha256"

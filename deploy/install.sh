@@ -6,6 +6,24 @@
 
 set -e
 
+# ───────────────────────────────────────────────
+# 临时文件清理陷阱（无论脚本如何退出，都清理残留文件）
+# ───────────────────────────────────────────────
+TMP_DOWNLOAD_DIR=""
+TMP_FILES=""
+
+cleanup() {
+    local exit_code=$?
+    for f in $TMP_FILES; do
+        rm -f "$f" 2>/dev/null || true
+    done
+    if [ -n "$TMP_DOWNLOAD_DIR" ] && [ -d "$TMP_DOWNLOAD_DIR" ] && [ "$TMP_DOWNLOAD_DIR" != "/" ]; then
+        rm -rf "$TMP_DOWNLOAD_DIR" 2>/dev/null || true
+    fi
+    exit $exit_code
+}
+trap cleanup EXIT INT TERM
+
 # 全局关闭 .NET 全球化依赖(libicu)。覆盖 install.sh 子进程内的所有 Agent 调用
 # (如注册 --register-only)。注意:systemd 服务进程不继承此 export,由 unit 文件内
 # 的 Environment= 单独覆盖;交互式 shell 由 /etc/profile.d 覆盖。自带
@@ -19,6 +37,30 @@ INSTALL_DIR="/opt/TopSSL-CertGuard-Agent"
 DATA_DIR="/var/lib/TopSSL-CertGuard-Agent"
 SERVICE_NAME="topssl-certguard-agent"
 VERSION="1.0.5"
+MIN_SPACE_MB=200
+
+# ───────────────────────────────────────────────
+# 临时目录选择与空间检查
+# 优先级: $TMPDIR > /var/tmp > /tmp
+# ───────────────────────────────────────────────
+select_temp_dir() {
+    local candidates=""
+    [ -n "$TMPDIR" ] && candidates="$candidates $TMPDIR"
+    candidates="$candidates /var/tmp /tmp"
+
+    for dir in $candidates; do
+        mkdir -p "$dir" 2>/dev/null || continue
+        local avail_kb
+        avail_kb=$(df -k "$dir" 2>/dev/null | tail -1 | awk '{print $4}')
+        [ -z "$avail_kb" ] && continue
+        local avail_mb=$((avail_kb / 1024))
+        if [ "$avail_mb" -ge "$MIN_SPACE_MB" ]; then
+            echo "$dir"
+            return 0
+        fi
+    done
+    return 1
+}
 
 # ───────────────────────────────────────────────
 # 输出格式化辅助函数（统一规范）
@@ -142,24 +184,67 @@ case $ARCH in
 esac
 
 DOWNLOAD_URL="${SERVER}/agent/certguard-agent-${AGENT_ARCH}.tar.gz"
-TAR_PATH="/tmp/certguard-agent.tar.gz"
+
+# 选择临时下载目录（优先级：$TMPDIR > $INSTALL_DIR/.tmp > /var/tmp > /tmp）
+TMP_DOWNLOAD_DIR=$(select_temp_dir)
+if [ -z "$TMP_DOWNLOAD_DIR" ]; then
+    echo_err "所有候选临时目录空间均不足（需要至少 ${MIN_SPACE_MB}MB）"
+    echo_err ""
+    echo_err "请尝试以下任一方法后重试："
+    echo_err "  1. 设置 TMPDIR 指向空间充足的分区："
+    echo_err "     TMPDIR=/var/tmp curl ... | sudo bash -s -- --token ct_reg_xxx"
+    echo_err "  2. 清理 /tmp 目录：sudo rm -rf /tmp/*"
+    echo_err "  3. 扩展 /tmp 大小（tmpfs）：sudo mount -o remount,size=2G /tmp"
+    exit 1
+fi
+
+TAR_PATH="${TMP_DOWNLOAD_DIR}/certguard-agent.tar.gz"
+SHA256_PATH="${TMP_DOWNLOAD_DIR}/certguard-agent.tar.gz.sha256"
+TMP_FILES="$TMP_FILES $TAR_PATH $SHA256_PATH"
 
 echo_sub_info "下载地址: ${DOWNLOAD_URL}"
+echo_sub_info "临时目录: ${TMP_DOWNLOAD_DIR}"
 echo_sub_info "开始下载，请稍候..."
 # 注意：不加 -s/-S 标志，让 curl 对 TTY 输出默认详细进度（含速率/ETA/百分比/已下载）
 # 非 TTY 环境（如管道）curl 会自动跳过进度，不影响脚本继续执行
 if ! curl -fL "${DOWNLOAD_URL}" -o "${TAR_PATH}"; then
-    rm -f "${TAR_PATH}" 2>/dev/null || true
-    echo_err "下载失败，请检查网络或服务器地址: ${DOWNLOAD_URL}"
+    echo_err "下载失败，请检查网络或服务器地址"
+    echo_err "  ${DOWNLOAD_URL}"
+    echo_err "提示：检查服务器是否可达: curl -I ${SERVER}"
     exit 1
 fi
 
-if [ -f "${TAR_PATH}" ]; then
-    FILE_SIZE=$(du -h "${TAR_PATH}" | cut -f1)
-    echo_ok "下载完成，文件大小: ${FILE_SIZE}"
-else
+if [ ! -f "${TAR_PATH}" ]; then
     echo_err "下载文件不存在: ${TAR_PATH}"
     exit 1
+fi
+
+FILE_SIZE=$(du -h "${TAR_PATH}" | cut -f1)
+echo_sub_info "文件大小: ${FILE_SIZE}"
+
+# 下载并校验 SHA256（服务器可能未提供 .sha256 文件，此时跳过校验而非报错）
+echo_sub_info "校验文件完整性..."
+if curl -fsSL "${DOWNLOAD_URL}.sha256" -o "${SHA256_PATH}" 2>/dev/null; then
+    if [ -s "${SHA256_PATH}" ]; then
+        EXPECTED=$(awk '{print $1}' "${SHA256_PATH}" | tr -d '\r\n' | tr '[:upper:]' '[:lower:]')
+        ACTUAL=$(sha256sum "${TAR_PATH}" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')
+        if [ -z "$EXPECTED" ]; then
+            echo_warn "SHA256 校验文件为空，跳过校验"
+        elif [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo_err "SHA256 校验失败！安装包可能已损坏或被篡改。"
+            echo_err "  期望: ${EXPECTED}"
+            echo_err "  实际: ${ACTUAL}"
+            echo_err "安装已中止。请重新下载或联系技术支持。"
+            exit 1
+        else
+            echo_ok "SHA256 校验通过 (${EXPECTED})"
+        fi
+    else
+        echo_warn "SHA256 校验文件为空，跳过校验"
+    fi
+    rm -f "${SHA256_PATH}"
+else
+    echo_warn "无法获取 SHA256 校验文件（服务器可能未提供），跳过校验"
 fi
 
 # --keep-identity 模式下，解压前先备份 InstallDir 的 agent.json
@@ -170,6 +255,11 @@ DATA_DIR_CONFIG="${DATA_DIR}/agent.json"
 if [ "$KEEP_IDENTITY" = "true" ] && [ -f "$INSTALL_DIR_CONFIG" ]; then
     SAVED_AGENT_JSON=$(cat "$INSTALL_DIR_CONFIG")
     echo_sub_info "已备份现有配置文件 (InstallDir)"
+fi
+
+# 解压前清空安装目录旧文件（确保干净安装，agent.json 已在上步备份）
+if [ -d "${INSTALL_DIR}" ]; then
+    rm -rf "${INSTALL_DIR:?}"/* 2>/dev/null || true
 fi
 
 tar xzf "${TAR_PATH}" -C "${INSTALL_DIR}"

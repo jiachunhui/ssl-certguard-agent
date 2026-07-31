@@ -1,0 +1,13 @@
+# CertGuard Agent 行尾规范化
+# 强制 shell 脚本使用 LF（Linux/macOS 兼容）
+*.sh       text eol=lf
+
+# 强制 PowerShell 脚本使用 CRLF（Windows 兼容）
+*.ps1      text eol=crlf
+*.psm1     text eol=crlf
+
+# Markdown / 文档
+*.md       text eol=lf
+*.json     text eol=lf
+*.cs       text eol=crlf
+*.csproj   text eol=crlf
