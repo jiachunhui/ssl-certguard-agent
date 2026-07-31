@@ -503,13 +503,13 @@ function Install-CertGuardAgent {
         $paths = $machinePath -split ';' | ForEach-Object { $_.TrimEnd('\') }
         if ($InstallDir -notin $paths -and $installDirNormalized -notin $paths) {
             [Environment]::SetEnvironmentVariable("Path", "$machinePath;$InstallDir", [EnvironmentVariableTarget]::Machine)
-            # 刷新当前进程的 PATH
-            $env:Path = [Environment]::GetEnvironmentVariable("Path", [EnvironmentVariableTarget]::Machine)
             Write-OK "已添加到系统 PATH"
         }
         else {
-            Write-OK "已在 PATH 中，跳过"
+            Write-OK "已在系统 PATH 中，跳过"
         }
+        # 无论新增还是已存在，都刷新当前进程 PATH（确保当前窗口可用）
+        $env:Path = [Environment]::GetEnvironmentVariable("Path", [EnvironmentVariableTarget]::Machine)
     }
     catch {
         Write-Warn "添加 PATH 失败: $_"

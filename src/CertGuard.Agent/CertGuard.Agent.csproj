@@ -17,7 +17,8 @@
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <DebugType>embedded</DebugType>
+    <DebugType Condition="'$(Configuration)' == 'Debug'">embedded</DebugType>
+    <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
     
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
 

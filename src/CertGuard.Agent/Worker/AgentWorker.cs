@@ -72,9 +72,9 @@ public class AgentWorker : BackgroundService
                 await Task.Delay(_cfg.HeartbeatSec * 1000, ct);
             }
         }
-        catch (InvalidOperationException ex) when (ex.Message.Contains("No identity"))
+        catch (InvalidOperationException ex) when (ex.Message.Contains("没有身份") || ex.Message.Contains("No identity"))
         {
-            _log.LogCritical(ex, "Agent 无身份信息且没有注册令牌");
+            _log.LogCritical("Agent 无身份信息且没有注册令牌");
             _life.StopApplication();
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("AGENT_NOT_FOUND"))
@@ -88,7 +88,7 @@ public class AgentWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _log.LogCritical(ex, "严重错误");
+            _log.LogCritical("严重错误: {Error}", ex.Message);
             _life.StopApplication();
         }
     }

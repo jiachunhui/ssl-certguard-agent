@@ -344,14 +344,14 @@ cat > /etc/systemd/system/${SERVICE_NAME}.service << EOF
 Description=TopSSL.cn CertGuard Agent - SSL证书自动部署守护进程
 After=network-online.target
 Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
 Type=simple
 ExecStart=${INSTALL_DIR}/certguard-agent --data-dir ${DATA_DIR}
 Restart=on-failure
 RestartSec=10
-StartLimitBurst=5
-StartLimitIntervalSec=60
 User=root
 Environment=DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
 
@@ -391,9 +391,10 @@ if ! grep -q "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT" "$PROFILE_D" 2>/dev/null; t
 fi
 if [ "$PROFILE_CHANGED" = "true" ]; then
     echo_ok "已更新: $PROFILE_D"
-    echo_warn "请重新登录或执行 'source $PROFILE_D' 使 PATH 与环境变量生效"
+    echo_warn "请执行 'source $PROFILE_D' 或重新登录使 certguard-agent 命令生效"
 else
-    echo_ok "已在 PATH 中，跳过"
+    echo_ok "PATH 配置文件已存在"
+    echo_warn "当前 shell 未生效，请执行 'source $PROFILE_D' 或重新登录"
 fi
 
 # ── 验证与最终提示 ────────────────────────────────
@@ -415,7 +416,8 @@ if systemctl is-active --quiet "${SERVICE_NAME}"; then
     echo "    数据目录  : ${DATA_DIR}"
     echo "    日志目录  : ${LOG_DIR}"
     echo "    服务名称  : ${SERVICE_NAME}"
-    printf "%b    命令行名  : certguard-agent （已加入系统 PATH，重新登录后可直接使用）%b\n" "$_C_GRAY" "$_C_RESET"
+    printf "%b    命令行名  : certguard-agent （重新登录后可直接使用）%b\n" "$_C_GRAY" "$_C_RESET"
+    printf "%b               当前 shell 请先执行: source /etc/profile.d/topssl-certguard-agent.sh%b\n" "$_C_GRAY" "$_C_RESET"
 
     echo ""
     printf "%b  常用操作（复制对应命令到终端执行）%b\n" "$_C_CYAN" "$_C_RESET"
