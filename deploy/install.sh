@@ -348,8 +348,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=${INSTALL_DIR}/certguard-agent --data-dir ${DATA_DIR}
-Restart=always
+Restart=on-failure
 RestartSec=10
+StartLimitBurst=5
+StartLimitIntervalSec=60
 User=root
 Environment=DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
 

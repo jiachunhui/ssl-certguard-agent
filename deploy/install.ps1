@@ -475,6 +475,10 @@ function Install-CertGuardAgent {
         }
         New-Service @newServiceParams
         Write-OK "服务创建完成"
+
+        # 配置失败恢复：60秒内最多重启5次，之后停止
+        sc.exe failure $ServiceName reset=60 actions=restart/10000/restart/10000/restart/10000/restart/10000/restart/10000 >$null 2>&1
+        sc.exe failureflag $ServiceName 1 >$null 2>&1
     }
     catch {
         Write-Err "创建服务失败: $_"

@@ -17,19 +17,21 @@ namespace CertGuard.Agent.Worker;
 public class AgentWorker : BackgroundService
 {
     private readonly PlatformClient _client;
-    private readonly IDeployProvider _deploy;
+    private IDeployProvider _deploy;
     private readonly AgentConfig _cfg;
     private readonly ILogger<AgentWorker> _log;
     private readonly IHostApplicationLifetime _life;
+    private readonly ProviderFactory _factory;
     private readonly string _version;
-    private readonly string _osType;
-    private readonly string _osVer;
+    private string _osType;
+    private string _osVer;
     private bool _envReported;
 
     public AgentWorker(PlatformClient client, ProviderFactory factory,
         IOptions<AgentConfig> cfg, ILogger<AgentWorker> log, IHostApplicationLifetime life)
     {
         _client = client;
+        _factory = factory;
         _cfg = cfg.Value;
         _log = log;
         _life = life;
@@ -52,12 +54,16 @@ public class AgentWorker : BackgroundService
                 _life.StopApplication();
                 return;
             }
-            if (!_deploy.IsAvailable)
+            while (!_deploy.IsAvailable)
             {
-                _log.LogCritical("未检测到任何可用的 Web 服务器（Nginx/Apache/IIS），Agent 无法运行");
-                _life.StopApplication();
-                return;
+                _log.LogWarning("未检测到 Web 服务器（Nginx/Apache/IIS），{Sec}s 后重试...", _cfg.HeartbeatSec);
+                await Task.Delay(_cfg.HeartbeatSec * 1000, ct);
+                var (newProvider, newOsType, newOsVer) = _factory.Create();
+                _deploy = newProvider;
+                _osType = newOsType;
+                _osVer = newOsVer;
             }
+            _log.LogInformation("检测到 Web 服务器: {Web}", _deploy.Name);
             await SafeReportEnv(ct);
             _log.LogInformation("就绪。Web={Web}, 系统={Os}, 心跳={Hb}s", _deploy.Name, _osType, _cfg.HeartbeatSec);
             while (!ct.IsCancellationRequested)
