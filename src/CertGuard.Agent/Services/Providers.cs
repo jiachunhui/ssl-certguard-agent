@@ -357,10 +357,17 @@ public class IisProvider : IDeployProvider
 
     public async Task<bool> ReloadAsync(CancellationToken ct)
     {
-        var (ok, text) = await Proc.Exec("iisreset", "", ct);
-        if (ok) _log.LogInformation("IIS 重载完成");
-        else _log.LogError("IIS 重载失败:\n{Text}", text);
-        return ok;
+        // IIS 的 SSL 终止在内核 HTTP.sys。DeployAsync 中已通过 appcmd / PowerShell
+        // 把新证书指纹提交到 HTTPS 绑定，HTTP.sys 立即按新指纹处理新的 TLS 连接，
+        // 无需重启站点、无需回收应用池、无需 iisreset。
+        // 此处对齐微软 IIS Administration API 的实现约定：仅 CommitChanges，不 iisreset、不 recycle。
+        //
+        // 边界取舍：若应用在进程内自行缓存证书（如 Kestrel/HttpListener 自托管、
+        // ASP.NET 对外 mTLS 使用 X509Certificate2），这类证书不会随绑定更新而刷新，
+        // 需各自重载；本 Agent 不自动处理。
+        _log.LogInformation("IIS 无需重载：HTTPS 绑定已即时生效（对齐微软 IIS Administration API，未执行 iisreset/回收）");
+        await Task.CompletedTask;
+        return true;
     }
 
     public async Task<(bool ok, string[]? deployedDomains)> DeployAsync(string certPem, string keyPem, string[] domains, CancellationToken ct)
