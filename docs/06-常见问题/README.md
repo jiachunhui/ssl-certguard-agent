@@ -129,6 +129,49 @@ curl -fsSL https://www.topssl.cn/agent/install.sh | sudo bash -s -- \
 
  解决：手动执行 `nginx -t` 查看具体错误信息。
 
+ ### Q: 证书部署失败，Nginx 配置检查不通过？
+
+ Agent 执行 `nginx -t` 验证配置。失败通常是因为：
+
+ - Nginx 配置中引用了不存在的证书路径
+ - Nginx 配置文件存在语法错误
+ - 目标 Nginx 未编译 `--with-http_ssl_module`（自动创建 443 配置时会前置检测并直接跳过）
+
+ 解决：查看 Agent 日志中附带的 `nginx -t` 错误输出。**Agent 在修改配置前会先备份（`/etc/nginx/ssl/.backup/`），校验失败会自动回滚**，不会因为修改而影响现有服务。
+
+ ### Q: 任务提示"站点有 443 监听但缺少 ssl_certificate"？
+
+ 原因：站点的 server 块里有 `listen 443 ssl;`，但块内没有 `ssl_certificate` 指令——证书通常是通过 `include ssl.conf;` 之类的方式引入的。Agent 为避免误改 include 文件，会选择跳过并提示。
+
+ 解决办法：在该 server 块内（或 include 的配置文件中）添加：
+
+ ```nginx
+ ssl_certificate     /etc/nginx/ssl/你的主域名/fullchain.pem;
+ ssl_certificate_key /etc/nginx/ssl/你的主域名/privkey.pem;
+ ```
+
+ 详细说明见 [Nginx 证书部署教程](../05-实践教程/Nginx证书部署.md) 的"需要手动处理的场景"。
+
+ ### Q: 任务提示"80 端口为纯重定向块，无法自动创建 443"？
+
+ 原因：该域名的 80 端口 server 块只有 `return 301 https://...` 或 `rewrite` 跳转指令，没有 `root` / `proxy_pass` / `location` 等可服务内容。Agent 无法推断 443 应该提供什么内容，强行复制会形成 HTTPS 死循环，因此不自动创建。
+
+ 解决办法：手动为站点添加 443 配置，把原 80 块的内容（root / proxy_pass / location 等）复制到 443 块中，并加上证书指令：
+
+ ```nginx
+ server {
+     listen 443 ssl;
+     server_name example.com;
+
+     root /var/www/example;   # 原 80 块内容
+
+     ssl_certificate     /etc/nginx/ssl/example.com/fullchain.pem;
+     ssl_certificate_key /etc/nginx/ssl/example.com/privkey.pem;
+ }
+ ```
+
+ 详细说明见 [Nginx 证书部署教程](../05-实践教程/Nginx证书部署.md) 的"需要手动处理的场景"。
+
  ### Q: IIS 部署后证书未生效？
 
  1. 确认绑定的域名是否正确

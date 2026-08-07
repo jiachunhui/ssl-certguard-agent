@@ -46,104 +46,201 @@ public class NginxProvider : IDeployProvider
     private readonly ILogger<NginxProvider> _log;
     private readonly string _base;
     private string? _nginxBin;
+    private bool? _sslModuleOk;
 
     public NginxProvider(ILogger<NginxProvider> log, string? basePath = null)
     { _log = log; _base = basePath ?? "/etc/nginx/ssl"; }
 
+    /// <summary>
+    /// Nginx 证书部署，按域名逐场景处理（与 IIS 语义一致：部分匹配即部署匹配项）：
+    /// 1) 无匹配 server 块 → 跳过；全部未匹配 → 失败上报
+    /// 2) 匹配块内已配置 ssl_certificate（任何端口）→ 仅替换证书路径
+    /// 3) 匹配块仅监听 80 → 基于 80 块创建 443 配置（listen 443 ssl + 证书两行）
+    /// 4) 匹配块有证书但非 443 端口 → 同场景 2（替换证书路径）
+    /// 边界：listen 带 ssl 但缺 ssl_certificate（可能 include 引入）→ 跳过并警告；
+    ///       80 纯重定向块 → 不创建，提示手动配置。
+    /// </summary>
     public async Task<(bool ok, string[]? deployedDomains)> DeployAsync(string certPem, string keyPem, string[] domains, CancellationToken ct)
     {
         LastError = null;
         var primaryDomain = domains.Length > 0 ? domains[0] : "unknown";
 
-        // 扫描 Nginx 配置中的 server_name
-        var serverNames = await GetServerNamesAsync(ct);
-        _log.LogInformation("Nginx 中发现 {Count} 个 server_name: {Names}", serverNames.Count, string.Join(", ", serverNames));
+        // 1. 写入证书（原子写：临时文件 + rename，避免部署中断留下损坏的 PEM；私钥权限 600）
+        var dir = Path.Combine(_base, primaryDomain);
+        Directory.CreateDirectory(dir);
+        var certPath = Path.Combine(dir, "fullchain.pem");
+        var keyPath = Path.Combine(dir, "privkey.pem");
+        await WriteCertFileAsync(certPath, certPem, ct);
+        await WriteCertFileAsync(keyPath, keyPem, ct);
+        _log.LogInformation("Nginx 证书已写入: {Domain} -> {Dir}", primaryDomain, dir);
 
-        var matched = new List<string>();
+        // 2. 解析全部 server 块（include 递归展开 + 注释剥离 + 块级定位）
+        var parser = new NginxConfigParser(_log);
+        var blocks = await parser.LoadServerBlocksAsync(ct);
+        if (blocks.Count == 0)
+        {
+            LastError = "Nginx 部署失败：未发现任何 server 配置（请确认 nginx.conf 及 include 路径可读）";
+            _log.LogError("{Error}", LastError);
+            return (false, null);
+        }
+        _log.LogInformation("Nginx 解析到 {Count} 个 server 块", blocks.Count);
+
+        // 3. 逐域名处理
+        var writer = new NginxConfigWriter(_log)
+        {
+            BackupBase = Path.Combine(_base, ".backup") // 备份目录跟随证书目录，保证可写
+        };
+        var deployed = new List<string>();
         var skipped = new List<string>();
 
         foreach (var domain in domains)
         {
-            if (serverNames.Contains(domain))
-                matched.Add(domain);
-            else
+            var matched = blocks.Where(b => NginxConfigParser.MatchesDomain(b, domain)).ToList();
+            if (matched.Count == 0)
+            {
                 skipped.Add(domain + " -- Nginx 上无站点服务此域名");
+                continue;
+            }
+
+            var sslBlocks = matched.Where(b => b.HasSslCertificate).ToList();
+            var sslListenOnly = matched.Where(b => !b.HasSslCertificate && (b.HasSslListen || b.HasSslOn)).ToList();
+            var httpBlocks = matched.Where(b => !b.HasSslCertificate && !b.HasSslListen && !b.HasSslOn).ToList();
+
+            // 场景 2/4：匹配块内已配置证书（任何端口）→ 全部替换为当前安装证书。
+            // 含变量表达式（动态证书，如 $ssl_server_name）的块跳过替换并警告，避免破坏动态证书逻辑。
+            var replaceable = new List<NginxServerBlock>();
+            var variableCert = new List<NginxServerBlock>();
+            foreach (var b in sslBlocks)
+            {
+                var hasVar = b.SslCertificateLines.Any(v => v.Contains('$'))
+                             || b.SslCertificateKeyLines.Any(v => v.Contains('$'));
+                (hasVar ? variableCert : replaceable).Add(b);
+            }
+            foreach (var b in replaceable)
+                writer.ReplaceCertificate(b, certPath, keyPath);
+            foreach (var b in variableCert)
+                _log.LogWarning(
+                    "域名 {Domain} 的 ssl_certificate 使用变量表达式（动态证书），跳过自动替换，请手动处理: {File}:{Line}",
+                    domain, b.FilePath, b.StartLine);
+
+            // 边界：listen 带 ssl 但块内无 ssl_certificate（可能由 include 引入）→ 跳过并警告
+            foreach (var b in sslListenOnly)
+                _log.LogWarning(
+                    "域名 {Domain} 存在 SSL 监听但缺少 ssl_certificate（可能由 include 引入），跳过自动修改，请手动配置: {File}:{Line}",
+                    domain, b.FilePath, b.StartLine);
+
+            // 场景 3：该域名无任何 SSL 配置 → 基于 80 块创建 443 块
+            if (replaceable.Count == 0 && sslListenOnly.Count == 0 && variableCert.Count == 0 && httpBlocks.Count > 0)
+            {
+                if (!await HasSslModuleAsync(ct))
+                {
+                    skipped.Add(domain + " -- Nginx 未编译 ssl 模块（nginx -V 缺少 --with-http_ssl_module），无法创建 443 配置");
+                    continue;
+                }
+                // 优先选非重定向且有内容的块做模板；全部纯重定向 → 提示手动配置
+                var template = httpBlocks.FirstOrDefault(b => !b.IsRedirectOnly && b.HasContent) ?? httpBlocks[0];
+                if (template.IsRedirectOnly)
+                {
+                    skipped.Add(domain + " -- 80 端口为纯重定向块，无法自动创建 443，请手动配置（" + template.FilePath + ":" + template.StartLine + "）");
+                    continue;
+                }
+                writer.AddHttpsServer(template, certPath, keyPath); // SAN 多域名命中同一块时内部去重
+                deployed.Add(domain);
+                _log.LogInformation("域名 {Domain}：已基于 {File}:{Line} 创建 443 配置", domain, template.FilePath, template.StartLine);
+            }
+            else if (replaceable.Count > 0)
+            {
+                deployed.Add(domain);
+            }
+            else
+            {
+                var reasons = new List<string>();
+                if (variableCert.Count > 0) reasons.Add("ssl_certificate 使用变量表达式（动态证书），跳过自动替换");
+                if (sslListenOnly.Count > 0) reasons.Add("存在 SSL 监听但缺少 ssl_certificate，请手动配置");
+                skipped.Add(domain + " -- " + string.Join("；", reasons));
+            }
         }
 
-        if (matched.Count == 0)
+        if (deployed.Count == 0)
         {
-            LastError = "Nginx 部署失败：未找到匹配的站点。跳过：" + string.Join("; ", skipped);
+            LastError = "Nginx 部署失败：未更新任何配置。跳过：" + string.Join("; ", skipped);
             _log.LogError("{Error}", LastError);
             return (false, null);
+        }
+
+        // 4. 应用修改 → nginx -t 校验 → 失败自动回滚（回滚后二次校验，确认恢复成功）
+        if (writer.HasChanges)
+        {
+            var (applyOk, applyErr) = await writer.ApplyAllAsync(ct);
+            if (!applyOk)
+            {
+                var rollbackOk = await writer.RollbackAsync();
+                LastError = rollbackOk
+                    ? "Nginx 配置写入失败，已回滚: " + applyErr
+                    : "Nginx 配置写入失败且回滚异常，配置可能已损坏，请立即手动检查 /etc/nginx（备份目录 " + writer.BackupBase + "）: " + applyErr;
+                _log.LogError("{Error}", LastError);
+                return (false, null);
+            }
+            var bin = _nginxBin ??= FindNginxBin() ?? "nginx";
+            var (tOk, tText) = await Proc.Exec(bin, "-t", ct);
+            if (!tOk)
+            {
+                var rollbackOk = await writer.RollbackAsync();
+                if (!rollbackOk)
+                {
+                    LastError = "nginx -t 校验失败且回滚异常，配置可能已损坏，请立即手动检查 /etc/nginx（备份目录 " + writer.BackupBase + "）:\n" + tText;
+                }
+                else
+                {
+                    // 二次校验：确认回滚后的配置可加载，否则说明恢复本身有问题
+                    var (rOk, rText) = await Proc.Exec(bin, "-t", ct);
+                    LastError = rOk
+                        ? "nginx -t 校验失败，已自动回滚配置:\n" + tText
+                        : "nginx -t 校验失败，已回滚但回滚后配置仍无法通过校验，请手动检查配置（备份目录 " + writer.BackupBase + "）:\n" + rText;
+                }
+                _log.LogError("{Error}", LastError);
+                return (false, null);
+            }
+            _log.LogInformation("nginx -t 校验通过");
         }
 
         foreach (var s in skipped)
             _log.LogWarning("跳过域名: {Reason}", s);
 
-        // 写入证书
-        var dir = Path.Combine(_base, primaryDomain);
-        Directory.CreateDirectory(dir);
-        await File.WriteAllTextAsync(Path.Combine(dir, "fullchain.pem"), certPem, ct);
-        await File.WriteAllTextAsync(Path.Combine(dir, "privkey.pem"), keyPem, ct);
-        var keyPath = Path.Combine(dir, "privkey.pem");
-        if (OperatingSystem.IsLinux()) File.SetUnixFileMode(keyPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-        _log.LogInformation("Nginx 证书已写入: {Domain} -> {Dir}", primaryDomain, dir);
-        return (true, matched.ToArray());
+        _log.LogInformation("Nginx 证书部署完成：{Domains}，证书目录={Dir}", string.Join(", ", deployed), dir);
+        return (true, deployed.ToArray());
     }
 
     public async Task<bool> ReloadAsync(CancellationToken ct)
     {
-        var (ok, text) = await Proc.Exec("nginx", "-t", ct);
+        var bin = _nginxBin ??= FindNginxBin() ?? "nginx";
+        var (ok, text) = await Proc.Exec(bin, "-t", ct);
         if (!ok) { _log.LogError("nginx -t 配置检查失败:\n{Text}", text); return false; }
-        (ok, text) = await Proc.Exec("nginx", "-s reload", ct);
+        (ok, text) = await Proc.Exec(bin, "-s reload", ct);
         if (ok) _log.LogInformation("Nginx 重载完成");
         else _log.LogError("Nginx 重载失败:\n{Text}", text);
         return ok;
     }
 
-    // ---- 以下为 Nginx 站点扫描辅助方法 ----
-
-    private static List<string> GetNginxConfigFiles()
+    /// <summary>检测 Nginx 是否编译了 ssl 模块（创建 443 配置的前置条件；结果缓存，避免每个域名重复执行 nginx -V）</summary>
+    private async Task<bool> HasSslModuleAsync(CancellationToken ct)
     {
-        var files = new List<string>();
-        string[] searchDirs = { "/etc/nginx/sites-enabled", "/etc/nginx/conf.d" };
-        foreach (var dir in searchDirs)
-        {
-            if (!Directory.Exists(dir)) continue;
-            foreach (var f in Directory.GetFiles(dir))
-            {
-                var ext = Path.GetExtension(f);
-                if (string.IsNullOrEmpty(ext) || ext == ".conf")
-                    files.Add(f);
-            }
-        }
-        if (File.Exists("/etc/nginx/nginx.conf"))
-            files.Add("/etc/nginx/nginx.conf");
-        return files;
-    }
-
-    private static HashSet<string> ParseServerNames(string configText)
-    {
-        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var regex = new Regex(@"server_name\s+([^;]+);", RegexOptions.IgnoreCase);
-        foreach (Match m in regex.Matches(configText))
-        {
-            foreach (var name in m.Groups[1].Value.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries))
-            {
-                var trimmed = name.Trim();
-                if (!string.IsNullOrEmpty(trimmed) && trimmed != "_")
-                    names.Add(trimmed);
-            }
-        }
-        return names;
-    }
-
-    private async Task<string?> ReadNginxFullConfigAsync(CancellationToken ct)
-    {
+        if (_sslModuleOk.HasValue) return _sslModuleOk.Value;
         var bin = _nginxBin ??= FindNginxBin();
-        if (bin is null) return null;
-        var (ok, output) = await Proc.Exec(bin, "-T", ct);
-        return ok ? output : null;
+        if (bin is null) return false;
+        var (ok, output) = await Proc.Exec(bin, "-V", ct);
+        _sslModuleOk = ok && output.Contains("--with-http_ssl_module", StringComparison.OrdinalIgnoreCase);
+        return _sslModuleOk.Value;
+    }
+
+    /// <summary>原子写入证书文件：临时文件 + rename，Linux 下统一 600 权限（证书与私钥）</summary>
+    private static async Task WriteCertFileAsync(string path, string content, CancellationToken ct)
+    {
+        var tmp = path + ".tmp";
+        await File.WriteAllTextAsync(tmp, content, ct);
+        if (OperatingSystem.IsLinux())
+            File.SetUnixFileMode(tmp, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        File.Move(tmp, path, true);
     }
 
     private static string? FindNginxBin()
@@ -152,30 +249,6 @@ public class NginxProvider : IDeployProvider
         foreach (var p in paths)
             if (File.Exists(p)) return p;
         return null;
-    }
-
-    private async Task<HashSet<string>> GetServerNamesAsync(CancellationToken ct)
-    {
-        // 先尝试扫描配置文件
-        var files = GetNginxConfigFiles();
-        if (files.Count > 0)
-        {
-            var sb = new StringBuilder();
-            foreach (var f in files)
-            {
-                try { sb.AppendLine(await File.ReadAllTextAsync(f, ct)); }
-                catch (Exception ex) { _log.LogDebug("无法读取 {File}: {Error}", f, ex.Message); }
-            }
-            var names = ParseServerNames(sb.ToString());
-            if (names.Count > 0) return names;
-        }
-
-        // 回退：使用 nginx -T 导出完整配置
-        var fullConfig = await ReadNginxFullConfigAsync(ct);
-        if (!string.IsNullOrEmpty(fullConfig))
-            return ParseServerNames(fullConfig);
-
-        return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     }
 }
 
