@@ -63,7 +63,10 @@ public class NginxProvider : IDeployProvider
     public async Task<(bool ok, string[]? deployedDomains)> DeployAsync(string certPem, string keyPem, string[] domains, CancellationToken ct)
     {
         LastError = null;
-        var primaryDomain = domains.Length > 0 ? domains[0] : "unknown";
+        // 主域名目录：优先取第一个非通配符条目；纯通配证书则去掉 *. 前缀，
+        // 避免证书目录名出现 '*'（如 /etc/nginx/ssl/*.example.com/）
+        var primaryDomain = domains.FirstOrDefault(d => !string.IsNullOrEmpty(d) && !d.StartsWith("*."))
+                            ?? (domains.Length > 0 && domains[0].StartsWith("*.") ? domains[0][2..] : (domains.Length > 0 ? domains[0] : "unknown"));
 
         // 1. 写入证书（原子写：临时文件 + rename，避免部署中断留下损坏的 PEM；私钥权限 600）
         var dir = Path.Combine(_base, primaryDomain);
@@ -101,6 +104,15 @@ public class NginxProvider : IDeployProvider
                 skipped.Add(domain + " -- Nginx 上无站点服务此域名");
                 continue;
             }
+
+            // 实际命中的 server_name：通配符证书条目（*.example.com）展开为具体域名，
+            // 平台上报时使用真实站点域名而非通配符本身
+            var hitNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var b in matched)
+                foreach (var n in b.ServerNames)
+                    if (NginxConfigParser.DomainMatch(n, domain))
+                        hitNames.Add(n);
+            if (hitNames.Count == 0) hitNames.Add(domain); // 兜底（正常情况下不会发生）
 
             var sslBlocks = matched.Where(b => b.HasSslCertificate).ToList();
             var sslListenOnly = matched.Where(b => !b.HasSslCertificate && (b.HasSslListen || b.HasSslOn)).ToList();
@@ -145,12 +157,12 @@ public class NginxProvider : IDeployProvider
                     continue;
                 }
                 writer.AddHttpsServer(template, certPath, keyPath); // SAN 多域名命中同一块时内部去重
-                deployed.Add(domain);
+                deployed.AddRange(hitNames);
                 _log.LogInformation("域名 {Domain}：已基于 {File}:{Line} 创建 443 配置", domain, template.FilePath, template.StartLine);
             }
             else if (replaceable.Count > 0)
             {
-                deployed.Add(domain);
+                deployed.AddRange(hitNames);
             }
             else
             {

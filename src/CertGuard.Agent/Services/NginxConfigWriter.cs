@@ -48,7 +48,8 @@ public sealed class NginxConfigWriter
             if (m.Success)
             {
                 var prefix = raw[..Math.Min(m.Groups[1].Index + m.Groups[1].Length, raw.Length)];
-                lines[i] = prefix + certPath + ExtractTrailingComment(raw);
+                // 注意保留分号结尾，否则 nginx 会把下一行误解析为指令参数
+                lines[i] = prefix + certPath + ";" + ExtractTrailingComment(raw);
                 changed = true;
                 continue;
             }
@@ -56,7 +57,7 @@ public sealed class NginxConfigWriter
             if (mk.Success)
             {
                 var prefix = raw[..Math.Min(mk.Groups[1].Index + mk.Groups[1].Length, raw.Length)];
-                lines[i] = prefix + keyPath + ExtractTrailingComment(raw);
+                lines[i] = prefix + keyPath + ";" + ExtractTrailingComment(raw);
                 changed = true;
             }
         }
