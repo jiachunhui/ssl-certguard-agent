@@ -163,26 +163,38 @@ public class NginxProvider : IDeployProvider
                     "域名 {Domain} 存在 SSL 监听但缺少 ssl_certificate（可能由 include 引入），跳过自动修改，请手动配置: {File}:{Line}",
                     domain, b.FilePath, b.StartLine);
 
-            // 场景 3：该域名无任何 SSL 配置 → 基于 80 块创建 443 块
-            if (replaceable.Count == 0 && sslListenOnly.Count == 0 && variableCert.Count == 0 && httpBlocks.Count > 0)
+            // 场景 3：为尚无 SSL 配置的 80 块创建 443 块。
+            // 替换与创建是正交操作：通配证书条目同时命中多个站点时，
+            // 已有证书的块走替换，其余 80 块各自创建（同一 server_name 只创建一次；
+            // 已有 SSL 孪生的 server_name 不重复创建）。
+            var sslNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var b in replaceable.Concat(variableCert).Concat(sslListenOnly))
+                foreach (var n in b.ServerNames) sslNames.Add(n);
+            var createdNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var createSkip = new List<string>();
+            var createdAny = false;
+            var sslModuleOk = await HasSslModuleAsync(ct);
+            foreach (var b in httpBlocks)
             {
-                if (!await HasSslModuleAsync(ct))
+                var fresh = b.ServerNames.Where(n => !sslNames.Contains(n) && !createdNames.Contains(n)).ToList();
+                if (fresh.Count == 0) continue; // 该 server_name 已有 SSL 配置（或已创建）
+                if (b.IsRedirectOnly)
                 {
-                    skipped.Add(domain + " -- Nginx 未编译 ssl 模块（nginx -V 缺少 --with-http_ssl_module），无法创建 443 配置");
+                    createSkip.Add("80 端口为纯重定向块，无法自动创建 443（" + b.FilePath + ":" + b.StartLine + "）");
                     continue;
                 }
-                // 优先选非重定向且有内容的块做模板；全部纯重定向 → 提示手动配置
-                var template = httpBlocks.FirstOrDefault(b => !b.IsRedirectOnly && b.HasContent) ?? httpBlocks[0];
-                if (template.IsRedirectOnly)
+                if (!sslModuleOk)
                 {
-                    skipped.Add(domain + " -- 80 端口为纯重定向块，无法自动创建 443，请手动配置（" + template.FilePath + ":" + template.StartLine + "）");
-                    continue;
+                    createSkip.Add("Nginx 未编译 ssl 模块（nginx -V 缺少 --with-http_ssl_module），无法创建 443 配置");
+                    break;
                 }
-                writer.AddHttpsServer(template, certPath, keyPath); // SAN 多域名命中同一块时内部去重
-                deployed.AddRange(hitNames);
-                _log.LogInformation("域名 {Domain}：已基于 {File}:{Line} 创建 443 配置", domain, template.FilePath, template.StartLine);
+                writer.AddHttpsServer(b, certPath, keyPath); // SAN 多域名命中同一块时内部去重
+                foreach (var n in fresh) createdNames.Add(n);
+                createdAny = true;
+                _log.LogInformation("域名 {Domain}：已基于 {File}:{Line} 创建 443 配置", domain, b.FilePath, b.StartLine);
             }
-            else if (replaceable.Count > 0)
+
+            if (replaceable.Count > 0 || createdAny)
             {
                 deployed.AddRange(hitNames);
             }
@@ -191,6 +203,8 @@ public class NginxProvider : IDeployProvider
                 var reasons = new List<string>();
                 if (variableCert.Count > 0) reasons.Add("ssl_certificate 使用变量表达式（动态证书），跳过自动替换");
                 if (sslListenOnly.Count > 0) reasons.Add("存在 SSL 监听但缺少 ssl_certificate，请手动配置");
+                reasons.AddRange(createSkip);
+                if (reasons.Count == 0) reasons.Add("所有匹配站点均无 SSL 配置且无法自动创建");
                 skipped.Add(domain + " -- " + string.Join("；", reasons));
             }
         }
@@ -371,29 +385,41 @@ public class ApacheProvider : IDeployProvider
                     "域名 {Domain} 存在 443 监听但缺少 SSLCertificateFile（可能由 Include 引入），跳过自动修改，请手动配置: {File}:{Line}",
                     domain, v.FilePath, v.StartLine);
 
-            // 场景 3：该域名无任何 SSL 配置 → 基于 80 块创建 443 VirtualHost
-            if (replaceable.Count == 0 && sslListenOnly.Count == 0 && variableCert.Count == 0 && httpBlocks.Count > 0)
+            // 场景 3：为尚无 SSL 配置的 80 块创建 443 VirtualHost。
+            // 替换与创建是正交操作：通配证书条目同时命中多个站点时，
+            // 已有证书的块走替换，其余 80 块各自创建（同一 server_name 只创建一次；
+            // 已有 SSL 孪生的 server_name 不重复创建）。
+            var sslNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var v in replaceable.Concat(variableCert).Concat(sslListenOnly))
+                foreach (var n in v.ServerNames) sslNames.Add(n);
+            var createdNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var createSkip = new List<string>();
+            var createdAny = false;
+            var sslModuleOk = await HasSslModuleAsync(ct);
+            foreach (var v in httpBlocks)
             {
-                if (!await HasSslModuleAsync(ct))
+                var fresh = v.ServerNames.Where(n => !sslNames.Contains(n) && !createdNames.Contains(n)).ToList();
+                if (fresh.Count == 0) continue; // 该 server_name 已有 SSL 配置（或已创建）
+                if (v.IsRedirectOnly)
                 {
-                    skipped.Add(domain + " -- Apache 未启用 mod_ssl（无法使用 SSLEngine），无法创建 443 VirtualHost");
+                    createSkip.Add("80 端口为纯重定向块，无法自动创建 443（" + v.FilePath + ":" + v.StartLine + "）");
                     continue;
                 }
-                // 优先选非重定向且有内容的块做模板；全部纯重定向 → 提示手动配置
-                var template = httpBlocks.FirstOrDefault(v => !v.IsRedirectOnly && v.HasContent) ?? httpBlocks[0];
-                if (template.IsRedirectOnly)
+                if (!sslModuleOk)
                 {
-                    skipped.Add(domain + " -- 80 端口为纯重定向块，无法自动创建 443，请手动配置（" + template.FilePath + ":" + template.StartLine + "）");
-                    continue;
+                    createSkip.Add("Apache 未启用 mod_ssl（无法使用 SSLEngine），无法创建 443 VirtualHost");
+                    break;
                 }
                 // Apache 的 VirtualHost 端口需要全局 Listen 支持，缺少 443 时自动补充
                 var ensureListen443 = !listenPorts.Contains(443);
-                writer.AddHttpsVirtualHost(template, certPath, keyPath, ensureListen443);
-                deployed.AddRange(hitNames);
+                writer.AddHttpsVirtualHost(v, certPath, keyPath, ensureListen443);
+                foreach (var n in fresh) createdNames.Add(n);
+                createdAny = true;
                 _log.LogInformation("域名 {Domain}：已基于 {File}:{Line} 创建 443 VirtualHost（补 Listen 443={Ensure}）",
-                    domain, template.FilePath, template.StartLine, ensureListen443);
+                    domain, v.FilePath, v.StartLine, ensureListen443);
             }
-            else if (replaceable.Count > 0)
+
+            if (replaceable.Count > 0 || createdAny)
             {
                 deployed.AddRange(hitNames);
             }
@@ -402,6 +428,8 @@ public class ApacheProvider : IDeployProvider
                 var reasons = new List<string>();
                 if (variableCert.Count > 0) reasons.Add("SSLCertificateFile 使用变量表达式（动态证书），跳过自动替换");
                 if (sslListenOnly.Count > 0) reasons.Add("存在 443 监听但缺少 SSLCertificateFile，请手动配置");
+                reasons.AddRange(createSkip);
+                if (reasons.Count == 0) reasons.Add("所有匹配站点均无 SSL 配置且无法自动创建");
                 skipped.Add(domain + " -- " + string.Join("；", reasons));
             }
         }
