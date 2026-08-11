@@ -1,3 +1,8 @@
+---
+title: 项目概述
+description: CertGuard Agent 是轻量级 SSL 证书自动部署守护进程，配合 TOPSSL.CN 平台使用，自动完成 Nginx/Apache/IIS 证书部署与续签，私钥不出服务器。
+---
+
  # 概述
 
  > 安全、透明、可控的 SSL 证书自动化管理方案
@@ -25,7 +30,7 @@
 
  ## 工作流程
 
- ![CertGuard Agent 工作原理图](../../website/public/architecture.svg)
+ ![CertGuard Agent 工作原理图](/architecture.svg)
 
  1. Agent 启动后自动检测本地 Web 服务类型，上报环境信息
  2. 首次运行使用一次性令牌注册，之后全部使用 HMAC 签名通信
@@ -34,6 +39,6 @@
 
  ## 继续阅读
 
-- [为什么开源](./为什么开源.md) — 了解本项目开源的理念与目标
-- [安全架构](./安全架构.md) — 深入了解安全设计
-- [快速入门](../02-快速入门/README.md) — 30 秒上手
+- [为什么开源](/guide/why-open-source) — 了解本项目开源的理念与目标
+- [安全架构](/guide/security) — 深入了解安全设计
+- [快速入门](/quickstart) — 30 秒上手

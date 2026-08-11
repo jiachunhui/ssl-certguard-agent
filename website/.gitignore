@@ -1,0 +1,20 @@
+# dependencies
+node_modules
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# build output
+.vitepress/dist
+dist
+node_modules/.vite
+
+# Vite/VitePress 缓存
+.vitepress/cache
+.vitepress/*.timestamp-*.mjs
+
+# 本地内容处理脚本产物
+_build
+
+# logs
+*.log

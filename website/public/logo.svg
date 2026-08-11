@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- 盾牌主体 -->
+  <defs>
+    <linearGradient id="shieldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#2563eb;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#06b6d4;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <!-- 盾牌 -->
+  <path d="M256 32 L448 96 V256 C448 352 368 432 256 480 C144 432 64 352 64 256 V96 Z"
+        fill="url(#shieldGrad)" />
+  <!-- 锁体 -->
+  <rect x="176" y="236" width="160" height="128" rx="20" fill="#ffffff" />
+  <!-- 锁梁 -->
+  <path d="M200 236 V192 a56 56 0 0 1 112 0 V236"
+        fill="none" stroke="#ffffff" stroke-width="34" stroke-linecap="round" />
+  <!-- 锁孔 -->
+  <circle cx="256" cy="296" r="22" fill="url(#shieldGrad)" />
+</svg>

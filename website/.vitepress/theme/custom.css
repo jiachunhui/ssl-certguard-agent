@@ -1,0 +1,51 @@
+/**
+ * CertGuard Agent 站点自定义主题
+ * 品牌色：安全蓝（#2563eb 系），与 SSL/安全产品气质一致
+ */
+:root {
+  /* 品牌主色 */
+  --vp-c-brand-1: #2563eb;
+  --vp-c-brand-2: #1d4ed8;
+  --vp-c-brand-3: #1e40af;
+  --vp-c-brand-soft: rgba(37, 99, 235, 0.14);
+
+  /* 首页 hero 背景光晕 */
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: linear-gradient(120deg, #2563eb 20%, #06b6d4 70%);
+  --vp-home-hero-image-background-image: linear-gradient(120deg, rgba(37, 99, 235, 0.16) 20%, rgba(6, 182, 212, 0.12) 70%);
+  --vp-home-hero-image-filter: blur(56px);
+
+  /* 强调色微调 */
+  --vp-custom-block-tip-border: #2563eb;
+  --vp-custom-block-tip-text: #2563eb;
+}
+
+/* 首页 hero 名称字体 */
+.vp-hero-name {
+  font-weight: 700;
+}
+
+/* 首页特征卡片 hover 提升 */
+.vp-feature {
+  transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+}
+.vp-feature:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 12px 32px rgba(37, 99, 235, 0.12);
+  border-color: var(--vp-c-brand-1) !important;
+}
+
+/* 暗色模式适配（主题色自动切换，无需额外处理） */
+.dark {
+  --vp-c-brand-1: #60a5fa;
+  --vp-c-brand-2: #3b82f6;
+  --vp-c-brand-3: #2563eb;
+  --vp-c-brand-soft: rgba(96, 165, 250, 0.16);
+}
+
+/* 表格优化 */
+.vp-doc table {
+  width: 100%;
+  display: table;
+  border-collapse: collapse;
+}

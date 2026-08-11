@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://certguard.topssl.cn/sitemap.xml
