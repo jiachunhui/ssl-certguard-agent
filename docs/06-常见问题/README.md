@@ -175,7 +175,7 @@ curl -fsSL https://www.topssl.cn/agent/install.sh | sudo bash -s -- \
  ### Q: IIS 部署后证书未生效？
 
  1. 确认绑定的域名是否正确
- 2. 执行 `iisreset` 手动重启 IIS
+ 2. 通常证书绑定即时生效，**无需 `iisreset`**；若应用在进程内缓存证书（Kestrel / HttpListener / mTLS），需重载对应应用
  3. 检查证书是否在 Windows 证书存储中（`certlm.msc` → 个人）
  4. 确认 HTTPS 绑定已正确添加
 

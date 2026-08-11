@@ -42,9 +42,11 @@
  - 通过 PowerShell 将导入的证书指纹分配给 HTTPS 绑定
  - 启用 SNI（服务器名称指示）
 
- ### 6. 重置 IIS
+ ### 6. 即时生效（无需重启）
 
- 执行 `iisreset` 使新绑定和证书生效。
+ IIS 的 SSL 终止在内核 **HTTP.sys**。Agent 通过 appcmd / PowerShell 将新证书指纹提交到 HTTPS 绑定后，HTTP.sys 立即按新指纹处理新的 TLS 连接——**无需重启站点、无需回收应用池、无需执行 `iisreset`**（对齐微软 IIS Administration API 的实现约定：仅 CommitChanges）。
+
+ > **边界取舍**：若应用在进程内自行缓存证书（如 Kestrel / HttpListener 自托管、ASP.NET 对外 mTLS 使用 `X509Certificate2`），这类证书不会随绑定更新而刷新，需自行重载对应应用；本 Agent 不自动处理。
 
  ## IIS 站点配置示例
 
@@ -75,7 +77,7 @@
  [INF] 站点: [1] Default Web Site
  [INF] 站点: [2] example.com
  [INF] IIS 证书部署完成：example.com，哈希=XXXX...。更新 1 个绑定，跳过 0 个。
- [INF] IIS 重载完成
+ [INF] IIS 无需重载：HTTPS 绑定已即时生效（对齐微软 IIS Administration API，未执行 iisreset/回收）
  ```
 
  > ![截图] 此处占位：PowerShell 中查看 Agent 日志的截图，展示 IIS 部署成功
